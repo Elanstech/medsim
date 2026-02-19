@@ -1,740 +1,505 @@
 /* ═══════════════════════════════════════════
-   SimEHR — data.js
-   Seed patients, order catalog, result generators,
-   note templates, SmartPhrases, sim config
+   SimEHR v3 — data.js
+   Clinical brain: timing, pharmacology, rules,
+   scenario scripts, result generators
    ═══════════════════════════════════════════ */
+const SCHEMA_VERSION=3;
+const rr=(a,b,d=1)=>+(a+Math.random()*(b-a)).toFixed(d);
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).substr(2,5);
 
-// ─── SCHEMA VERSION (for localStorage migrations) ───
-const SCHEMA_VERSION = 2;
-
-// ─── SIM TIMING CONFIG (milliseconds at 1x speed) ───
-const SIM_TIMING = {
-  // Order pipeline delays per category + priority
-  lab: {
-    STAT:    { sign: 3000, collect: 8000,  process: 20000, result: 35000 },
-    Urgent:  { sign: 3000, collect: 12000, process: 35000, result: 55000 },
-    Routine: { sign: 5000, collect: 20000, process: 50000, result: 80000 },
+/* ─── VARIABLE TIMING (ms at 1x) ───
+   Each value is [min, max] — randomized per order.
+   Represents REAL variability: sometimes lab is fast,
+   sometimes backed up. Imaging has longer variance. */
+const SIM_TIMING={
+  lab:{
+    STAT:   {sign:[2e3,4e3],collect:[5e3,12e3],process:[15e3,30e3],result:[25e3,50e3]},
+    Urgent: {sign:[3e3,5e3],collect:[10e3,18e3],process:[25e3,45e3],result:[40e3,70e3]},
+    Routine:{sign:[4e3,8e3],collect:[15e3,30e3],process:[40e3,70e3],result:[60e3,120e3]},
   },
-  imaging: {
-    STAT:    { sign: 3000, schedule: 10000, inProgress: 30000, result: 50000 },
-    Urgent:  { sign: 3000, schedule: 20000, inProgress: 45000, result: 70000 },
-    Routine: { sign: 5000, schedule: 30000, inProgress: 60000, result: 90000 },
+  imaging:{
+    STAT:   {sign:[2e3,4e3],schedule:[8e3,15e3],inProgress:[20e3,45e3],result:[35e3,70e3]},
+    Urgent: {sign:[3e3,5e3],schedule:[15e3,30e3],inProgress:[30e3,60e3],result:[50e3,100e3]},
+    Routine:{sign:[4e3,8e3],schedule:[25e3,50e3],inProgress:[50e3,90e3],result:[80e3,150e3]},
   },
-  diagnostic: {
-    STAT:    { sign: 2000, perform: 8000, interpret: 20000, result: 30000 },
-    Urgent:  { sign: 3000, perform: 15000, interpret: 30000, result: 45000 },
-    Routine: { sign: 5000, perform: 20000, interpret: 40000, result: 60000 },
+  diagnostic:{
+    STAT:   {sign:[2e3,3e3],perform:[5e3,12e3],interpret:[12e3,25e3],result:[20e3,40e3]},
+    Urgent: {sign:[3e3,5e3],perform:[10e3,20e3],interpret:[20e3,35e3],result:[30e3,55e3]},
+    Routine:{sign:[4e3,7e3],perform:[15e3,30e3],interpret:[25e3,45e3],result:[40e3,70e3]},
   },
-  medication: {
-    STAT:    { sign: 2000, verify: 8000, dispense: 15000, ready: 20000 },
-    Urgent:  { sign: 3000, verify: 12000, dispense: 25000, ready: 30000 },
-    Routine: { sign: 5000, verify: 20000, dispense: 40000, ready: 50000 },
+  medication:{
+    STAT:   {sign:[1e3,3e3],verify:[5e3,10e3],dispense:[10e3,18e3],ready:[14e3,22e3]},
+    Urgent: {sign:[2e3,4e3],verify:[8e3,15e3],dispense:[18e3,30e3],ready:[22e3,38e3]},
+    Routine:{sign:[3e3,6e3],verify:[15e3,25e3],dispense:[30e3,50e3],ready:[40e3,65e3]},
   },
-  nursing: {
-    STAT:    { sign: 2000, acknowledge: 5000, complete: 15000 },
-    Urgent:  { sign: 3000, acknowledge: 8000, complete: 25000 },
-    Routine: { sign: 5000, acknowledge: 15000, complete: 40000 },
+  nursing:{
+    STAT:   {sign:[1e3,2e3],ack:[3e3,6e3],complete:[8e3,18e3]},
+    Urgent: {sign:[2e3,4e3],ack:[5e3,10e3],complete:[15e3,30e3]},
+    Routine:{sign:[3e3,6e3],ack:[8e3,15e3],complete:[25e3,45e3]},
   },
-  // Vitals auto-update interval
-  vitalsInterval: 60000, // 1 min at 1x
 };
 
-// ─── ORDER CATALOG ───
-const ORDER_CATALOG = [
-  // LABS — Hematology
-  { id:"OC1",  name:"CBC with Differential",        cat:"lab", sub:"Hematology",   resultKey:"cbc" },
-  { id:"OC2",  name:"Comprehensive Metabolic Panel", cat:"lab", sub:"Chemistry",    resultKey:"cmp" },
-  { id:"OC3",  name:"Basic Metabolic Panel",         cat:"lab", sub:"Chemistry",    resultKey:"bmp" },
-  { id:"OC4",  name:"Troponin I",                    cat:"lab", sub:"Cardiac",      resultKey:"trop" },
-  { id:"OC5",  name:"BNP",                           cat:"lab", sub:"Cardiac",      resultKey:"bnp" },
-  { id:"OC6",  name:"PT/INR",                        cat:"lab", sub:"Coagulation",  resultKey:"ptinr" },
-  { id:"OC7",  name:"PTT",                           cat:"lab", sub:"Coagulation",  resultKey:"ptt" },
-  { id:"OC8",  name:"Urinalysis",                    cat:"lab", sub:"Urine",        resultKey:"ua" },
-  { id:"OC9",  name:"Blood Culture x2",              cat:"lab", sub:"Micro",        resultKey:"bcx" },
-  { id:"OC10", name:"Lactate",                       cat:"lab", sub:"Chemistry",    resultKey:"lactate" },
-  { id:"OC11", name:"Procalcitonin",                 cat:"lab", sub:"Chemistry",    resultKey:"procal" },
-  { id:"OC12", name:"Lipase",                        cat:"lab", sub:"Chemistry",    resultKey:"lipase" },
-  { id:"OC13", name:"D-Dimer",                       cat:"lab", sub:"Coagulation",  resultKey:"ddimer" },
-  { id:"OC14", name:"Type and Screen",               cat:"lab", sub:"Blood Bank",   resultKey:"ts" },
-  { id:"OC15", name:"Urine Drug Screen",             cat:"lab", sub:"Toxicology",   resultKey:"uds" },
-  { id:"OC16", name:"Magnesium",                     cat:"lab", sub:"Chemistry",    resultKey:"mag" },
-  { id:"OC17", name:"Phosphorus",                    cat:"lab", sub:"Chemistry",    resultKey:"phos" },
-  { id:"OC18", name:"Lactic Acid (venous)",          cat:"lab", sub:"Chemistry",    resultKey:"lactate" },
-  { id:"OC19", name:"Ammonia",                       cat:"lab", sub:"Chemistry",    resultKey:"ammonia" },
-  { id:"OC20", name:"ESR",                           cat:"lab", sub:"Hematology",   resultKey:"esr" },
-  { id:"OC21", name:"CRP",                           cat:"lab", sub:"Chemistry",    resultKey:"crp" },
-  { id:"OC22", name:"Hemoglobin A1c",                cat:"lab", sub:"Chemistry",    resultKey:"a1c" },
-  { id:"OC23", name:"TSH",                           cat:"lab", sub:"Endocrine",    resultKey:"tsh" },
-  { id:"OC24", name:"Urine Culture",                 cat:"lab", sub:"Micro",        resultKey:"ucx" },
-  { id:"OC25", name:"ABG (Arterial Blood Gas)",      cat:"lab", sub:"Chemistry",    resultKey:"abg" },
-  { id:"OC26", name:"VBG (Venous Blood Gas)",        cat:"lab", sub:"Chemistry",    resultKey:"vbg" },
-  { id:"OC27", name:"Fibrinogen",                    cat:"lab", sub:"Coagulation",  resultKey:"fib" },
-
-  // IMAGING
-  { id:"OC40", name:"CXR PA/Lateral",                      cat:"imaging", sub:"X-Ray", resultKey:"cxr" },
-  { id:"OC41", name:"CT Head w/o Contrast",                cat:"imaging", sub:"CT",    resultKey:"cthead" },
-  { id:"OC42", name:"CT Abdomen/Pelvis w/ Contrast",       cat:"imaging", sub:"CT",    resultKey:"ctap" },
-  { id:"OC43", name:"CT Angiography Chest (PE Protocol)",  cat:"imaging", sub:"CT",    resultKey:"ctape" },
-  { id:"OC44", name:"XR Extremity 2-view",                 cat:"imaging", sub:"X-Ray", resultKey:"xrext" },
-  { id:"OC45", name:"Ultrasound RUQ",                      cat:"imaging", sub:"US",    resultKey:"usruq" },
-  { id:"OC46", name:"CT Cervical Spine w/o Contrast",      cat:"imaging", sub:"CT",    resultKey:"ctcsp" },
-  { id:"OC47", name:"XR Pelvis AP",                        cat:"imaging", sub:"X-Ray", resultKey:"xrpelvis" },
-  { id:"OC48", name:"US FAST Exam",                        cat:"imaging", sub:"US",    resultKey:"fast" },
-  { id:"OC49", name:"CT Coronary Angiography",             cat:"imaging", sub:"CT",    resultKey:"ctca" },
-
-  // DIAGNOSTIC
-  { id:"OC60", name:"EKG 12-Lead",                   cat:"diagnostic", sub:"Cardiac",     resultKey:"ekg" },
-  { id:"OC61", name:"Bedside Echocardiogram",        cat:"diagnostic", sub:"Cardiac",     resultKey:"echo" },
-  { id:"OC62", name:"Lumbar Puncture",               cat:"diagnostic", sub:"Procedure",   resultKey:"lp" },
-
-  // MEDICATIONS
-  { id:"OC80",  name:"Normal Saline 1000mL IV bolus",          cat:"medication", sub:"IV Fluids",  medEffect:{type:"fluid"} },
-  { id:"OC81",  name:"Lactated Ringer's 1000mL IV bolus",      cat:"medication", sub:"IV Fluids",  medEffect:{type:"fluid"} },
-  { id:"OC82",  name:"Morphine 4mg IV q4h PRN pain",           cat:"medication", sub:"Analgesic",  medEffect:{type:"vitals", hr:-5, bp:-5, rr:-2, pain:-3} },
-  { id:"OC83",  name:"Fentanyl 50mcg IV q1h PRN pain",         cat:"medication", sub:"Analgesic",  medEffect:{type:"vitals", hr:-3, bp:-3, rr:-2, pain:-4} },
-  { id:"OC84",  name:"Ketorolac 30mg IV x1",                   cat:"medication", sub:"Analgesic",  medEffect:{type:"vitals", pain:-3} },
-  { id:"OC85",  name:"Acetaminophen 1000mg PO/IV q6h PRN",     cat:"medication", sub:"Analgesic",  medEffect:{type:"vitals", temp:-1.0, pain:-2} },
-  { id:"OC86",  name:"Ondansetron 4mg IV q6h PRN nausea",      cat:"medication", sub:"Antiemetic", medEffect:null },
-  { id:"OC87",  name:"Ceftriaxone 2g IV daily",                cat:"medication", sub:"Antibiotic", medEffect:{type:"abx"} },
-  { id:"OC88",  name:"Azithromycin 500mg IV daily",            cat:"medication", sub:"Antibiotic", medEffect:{type:"abx"} },
-  { id:"OC89",  name:"Piperacillin-Tazobactam 4.5g IV q6h",   cat:"medication", sub:"Antibiotic", medEffect:{type:"abx"} },
-  { id:"OC90",  name:"Vancomycin 1g IV q12h",                  cat:"medication", sub:"Antibiotic", medEffect:{type:"abx"} },
-  { id:"OC91",  name:"Metoprolol 5mg IV q5min x3 PRN",        cat:"medication", sub:"Cardiac",    medEffect:{type:"vitals", hr:-15, bp:-10} },
-  { id:"OC92",  name:"Nitroglycerin 0.4mg SL PRN chest pain",  cat:"medication", sub:"Cardiac",    medEffect:{type:"vitals", bp:-15, pain:-2} },
-  { id:"OC93",  name:"Aspirin 325mg PO STAT",                  cat:"medication", sub:"Cardiac",    medEffect:null },
-  { id:"OC94",  name:"Heparin 60 units/kg IV bolus",           cat:"medication", sub:"Anticoag",   medEffect:null },
-  { id:"OC95",  name:"Heparin drip 12 units/kg/hr",            cat:"medication", sub:"Anticoag",   medEffect:null },
-  { id:"OC96",  name:"Norepinephrine 0.1mcg/kg/min IV",        cat:"medication", sub:"Pressor",    medEffect:{type:"vitals", bp:+20, hr:+5} },
-  { id:"OC97",  name:"Albuterol 2.5mg nebulizer q4h + PRN",    cat:"medication", sub:"Respiratory",medEffect:{type:"vitals", spo2:+2, hr:+5} },
-  { id:"OC98",  name:"Methylprednisolone 125mg IV",             cat:"medication", sub:"Steroid",    medEffect:{type:"vitals"} },
-  { id:"OC99",  name:"Furosemide 40mg IV STAT",                cat:"medication", sub:"Diuretic",   medEffect:{type:"fluid"} },
-  { id:"OC100", name:"Meropenem 1g IV q8h",                    cat:"medication", sub:"Antibiotic", medEffect:{type:"abx"} },
-  { id:"OC101", name:"Hydrocortisone 100mg IV q8h",            cat:"medication", sub:"Steroid",    medEffect:{type:"vitals", bp:+5} },
-  { id:"OC102", name:"Lorazepam 1mg IV PRN anxiety/seizure",   cat:"medication", sub:"Sedative",   medEffect:{type:"vitals", hr:-5, rr:-2, bp:-5} },
-  { id:"OC103", name:"Naloxone 0.4mg IV/IM/IN PRN",            cat:"medication", sub:"Reversal",   medEffect:{type:"vitals", rr:+6} },
-  { id:"OC104", name:"Epinephrine 0.3mg IM (anaphylaxis)",     cat:"medication", sub:"Emergency",  medEffect:{type:"vitals", hr:+20, bp:+30} },
-
-  // NURSING
-  { id:"OC120", name:"Continuous Pulse Oximetry",   cat:"nursing", sub:"Monitoring" },
-  { id:"OC121", name:"Telemetry Monitoring",         cat:"nursing", sub:"Monitoring" },
-  { id:"OC122", name:"Strict I&O",                   cat:"nursing", sub:"Assessment" },
-  { id:"OC123", name:"Fall Precautions",              cat:"nursing", sub:"Safety" },
-  { id:"OC124", name:"NPO",                          cat:"nursing", sub:"Diet" },
-  { id:"OC125", name:"Foley Catheter Insertion",      cat:"nursing", sub:"Procedure" },
-  { id:"OC126", name:"Vitals q15min x4 then q1h",    cat:"nursing", sub:"Monitoring" },
-  { id:"OC127", name:"Neuro checks q1h",              cat:"nursing", sub:"Assessment" },
-  { id:"OC128", name:"Wound care per protocol",       cat:"nursing", sub:"Wound Care" },
-  { id:"OC129", name:"2L Nasal Cannula O2",           cat:"nursing", sub:"Respiratory", medEffect:{type:"vitals", spo2:+3} },
-  { id:"OC130", name:"Non-Rebreather 15L O2",         cat:"nursing", sub:"Respiratory", medEffect:{type:"vitals", spo2:+6} },
-  { id:"OC131", name:"Restraint Order — Soft Wrist",  cat:"nursing", sub:"Safety" },
-  { id:"OC132", name:"1:1 Sitter",                    cat:"nursing", sub:"Safety" },
+/* ─── RANDOM DELAY EVENTS ───
+   These can fire at any time and add delay to ALL pending orders
+   of a category. Simulates real ER chaos. */
+const DELAY_EVENTS=[
+  {cat:"lab",msg:"🔬 Lab is backed up — expect 30-60 min additional delay on routine labs",prob:0.08,delayMs:[20e3,40e3]},
+  {cat:"lab",msg:"🔬 Phlebotomy short-staffed — specimen collection delayed",prob:0.06,delayMs:[10e3,25e3]},
+  {cat:"imaging",msg:"📡 CT scanner down for maintenance — CT orders delayed 45+ min",prob:0.05,delayMs:[30e3,60e3]},
+  {cat:"imaging",msg:"📡 Multiple traumas in queue — imaging backed up",prob:0.07,delayMs:[15e3,35e3]},
+  {cat:"imaging",msg:"📡 Radiology attending reviewing — preliminary read delayed",prob:0.06,delayMs:[10e3,20e3]},
+  {cat:"medication",msg:"💊 Pharmacy verifying high-risk medication — additional delay",prob:0.05,delayMs:[8e3,18e3]},
+  {cat:"medication",msg:"💊 Pyxis machine down — nurse retrieving from main pharmacy",prob:0.04,delayMs:[12e3,25e3]},
+  {cat:"lab",msg:"🔬 Hemolyzed specimen — redraw required (auto-reordered)",prob:0.04,delayMs:[25e3,45e3],isRedraw:true},
+  {cat:"lab",msg:"🔬 Lab instrument calibration in progress — results delayed",prob:0.03,delayMs:[15e3,30e3]},
 ];
 
-// ─── SCENARIO-BASED RESULT GENERATORS ───
-// Each patient has a result map keyed by resultKey
-// Values can be static or functions (for trending/randomized values)
-// "flag" is auto-calculated from ref range
-
-function randRange(min, max, dec=1) {
-  return +(min + Math.random() * (max - min)).toFixed(dec);
-}
-
-const RESULT_GENERATORS = {
-  // ─── P001: Elena Martinez — NSTEMI ───
-  P001: {
-    _tropCount: 0, // tracks serial troponins for rising pattern
-    cbc: () => [
-      { name:"WBC",         value: randRange(10.5,12.2), unit:"K/uL",  ref:"4.5-11.0", refLo:4.5, refHi:11.0 },
-      { name:"Hemoglobin",  value: randRange(12.8,13.4), unit:"g/dL",  ref:"12.0-16.0", refLo:12.0, refHi:16.0 },
-      { name:"Hematocrit",  value: randRange(38,40),     unit:"%",     ref:"36-46", refLo:36, refHi:46 },
-      { name:"Platelets",   value: randRange(230,260),   unit:"K/uL",  ref:"150-400", refLo:150, refHi:400 },
-      { name:"Neutrophils",  value: randRange(72,80),    unit:"%",     ref:"40-70", refLo:40, refHi:70 },
-    ],
-    cmp: () => [
-      { name:"Sodium",     value: randRange(136,140,0),  unit:"mEq/L", ref:"136-145", refLo:136, refHi:145 },
-      { name:"Potassium",  value: randRange(3.9,4.3),    unit:"mEq/L", ref:"3.5-5.0", refLo:3.5, refHi:5.0 },
-      { name:"Chloride",   value: randRange(100,104,0),  unit:"mEq/L", ref:"98-106",  refLo:98,  refHi:106 },
-      { name:"CO2",        value: randRange(22,26,0),     unit:"mEq/L", ref:"22-28",   refLo:22,  refHi:28 },
-      { name:"BUN",        value: randRange(22,28,0),     unit:"mg/dL", ref:"7-20",    refLo:7,   refHi:20 },
-      { name:"Creatinine", value: randRange(1.3,1.5),     unit:"mg/dL", ref:"0.6-1.2", refLo:0.6, refHi:1.2 },
-      { name:"Glucose",    value: randRange(210,240,0),   unit:"mg/dL", ref:"70-100",  refLo:70,  refHi:100 },
-      { name:"Calcium",    value: randRange(8.8,9.4),     unit:"mg/dL", ref:"8.5-10.5",refLo:8.5, refHi:10.5 },
-      { name:"Total Protein", value: randRange(6.4,7.2),  unit:"g/dL", ref:"6.0-8.3", refLo:6.0, refHi:8.3 },
-      { name:"Albumin",    value: randRange(3.4,3.8),     unit:"g/dL", ref:"3.5-5.0",  refLo:3.5, refHi:5.0 },
-      { name:"AST",        value: randRange(28,38,0),      unit:"U/L",  ref:"10-40",   refLo:10,  refHi:40 },
-      { name:"ALT",        value: randRange(22,32,0),      unit:"U/L",  ref:"7-56",    refLo:7,   refHi:56 },
-      { name:"Alk Phos",   value: randRange(65,90,0),      unit:"U/L",  ref:"44-147",  refLo:44,  refHi:147 },
-      { name:"Total Bilirubin", value: randRange(0.6,1.0), unit:"mg/dL",ref:"0.1-1.2", refLo:0.1, refHi:1.2 },
-    ],
-    bmp: () => [
-      { name:"Sodium",     value: randRange(136,140,0),  unit:"mEq/L", ref:"136-145", refLo:136, refHi:145 },
-      { name:"Potassium",  value: randRange(3.9,4.3),    unit:"mEq/L", ref:"3.5-5.0", refLo:3.5, refHi:5.0 },
-      { name:"Chloride",   value: randRange(100,104,0),  unit:"mEq/L", ref:"98-106",  refLo:98,  refHi:106 },
-      { name:"CO2",        value: randRange(22,26,0),     unit:"mEq/L", ref:"22-28",   refLo:22,  refHi:28 },
-      { name:"BUN",        value: randRange(22,28,0),     unit:"mg/dL", ref:"7-20",    refLo:7,   refHi:20 },
-      { name:"Creatinine", value: randRange(1.3,1.5),     unit:"mg/dL", ref:"0.6-1.2", refLo:0.6, refHi:1.2 },
-      { name:"Glucose",    value: randRange(210,240,0),   unit:"mg/dL", ref:"70-100",  refLo:70,  refHi:100 },
-      { name:"Calcium",    value: randRange(8.8,9.4),     unit:"mg/dL", ref:"8.5-10.5",refLo:8.5, refHi:10.5 },
-    ],
-    trop: function() {
-      // Rising troponin pattern for NSTEMI
-      this._tropCount = (this._tropCount || 0) + 1;
-      const vals = [0.42, 0.89, 1.64, 2.31, 3.08, 3.52, 3.41];
-      const v = vals[Math.min(this._tropCount - 1, vals.length - 1)] + randRange(-0.05, 0.05);
-      return [{ name:"Troponin I", value: +v.toFixed(2), unit:"ng/mL", ref:"<0.04", refLo:0, refHi:0.04 }];
-    },
-    bnp:     () => [{ name:"BNP", value: randRange(350,420,0), unit:"pg/mL", ref:"<100", refLo:0, refHi:100 }],
-    ptinr:   () => [
-      { name:"PT",  value: randRange(11.5,13.0), unit:"sec",  ref:"11.0-13.5", refLo:11.0, refHi:13.5 },
-      { name:"INR", value: randRange(0.9,1.1),   unit:"",     ref:"0.9-1.1",   refLo:0.9,  refHi:1.1 },
-    ],
-    ptt:     () => [{ name:"PTT", value: randRange(28,35,0), unit:"sec", ref:"25-35", refLo:25, refHi:35 }],
-    lactate: () => [{ name:"Lactate", value: randRange(1.2,1.8), unit:"mmol/L", ref:"0.5-2.0", refLo:0.5, refHi:2.0 }],
-    mag:     () => [{ name:"Magnesium", value: randRange(1.8,2.2), unit:"mg/dL", ref:"1.7-2.2", refLo:1.7, refHi:2.2 }],
-    lipase:  () => [{ name:"Lipase", value: randRange(18,42,0), unit:"U/L", ref:"0-60", refLo:0, refHi:60 }],
-    ddimer:  () => [{ name:"D-Dimer", value: randRange(0.8,1.6), unit:"mg/L FEU", ref:"<0.50", refLo:0, refHi:0.50 }],
-    a1c:     () => [{ name:"HbA1c", value: randRange(7.8,8.6), unit:"%", ref:"<5.7", refLo:0, refHi:5.7 }],
-    cxr: () => [{ name:"CXR PA/Lateral", value:"Mild cardiomegaly. No acute infiltrate. No pneumothorax.", unit:"", ref:"",
-      report:"CLINICAL INDICATION: Chest pain, rule out acute process.\n\nCOMPARISON: None available.\n\nFINDINGS:\nHeart: Mildly enlarged cardiac silhouette.\nLungs: Clear bilaterally. No focal consolidation, effusion, or pneumothorax.\nMediastinum: Normal contours. No widening.\nBones: Degenerative changes of thoracic spine. No acute fracture.\n\nIMPRESSION:\n1. Mild cardiomegaly.\n2. No acute cardiopulmonary process.",
-      flag:"ABNORMAL", cat:"Imaging" }],
-    ekg: () => [{ name:"EKG 12-Lead", value:"Sinus tachycardia at 98 bpm. ST depression V3-V6. T-wave inversions leads I, aVL, V5-V6. No ST elevation. Normal axis. Normal intervals.", unit:"", ref:"",
-      report:"RATE: 98 bpm\nRHYTHM: Normal sinus\nAXIS: Normal\nINTERVALS: PR 164ms, QRS 88ms, QTc 448ms\n\nST CHANGES: Horizontal ST depression 1-2mm in V3-V6\nT-WAVE: Inversions in I, aVL, V5-V6\n\nINTERPRETATION: Sinus tachycardia with ST-T wave changes consistent with myocardial ischemia. Recommend serial troponins, cardiology consult.\n\nCritical value called to provider at [time].",
-      flag:"ABNORMAL", cat:"Diagnostic" }],
-    ctca: () => [{ name:"CT Coronary Angiography", value:"LAD: 80% stenosis mid-segment. LCx: 40% proximal. RCA: patent.", unit:"", ref:"",
-      report:"CLINICAL INDICATION: NSTEMI, evaluate coronary anatomy.\n\nTECHNIQUE: ECG-gated CT coronary angiography with IV contrast.\n\nFINDINGS:\nLeft Main: Patent, no significant stenosis.\nLAD: 80% stenosis in mid-segment with mixed plaque. Distal LAD patent.\nLCx: 40% stenosis proximal segment, non-flow-limiting.\nRCA: Patent throughout. Dominant RCA.\n\nCalcium Score: 342 Agatston units (moderate).\n\nIMPRESSION:\n1. Significant LAD stenosis (80%) — correlate with symptoms, recommend cardiology/interventional evaluation.\n2. Mild LCx disease.\n3. Moderate coronary calcium burden.",
-      flag:"ABNORMAL", cat:"Imaging" }],
-    ts: () => [{ name:"Type and Screen", value:"Type A Positive. Antibody screen negative.", unit:"", ref:"", flag:"NORMAL", cat:"Lab" }],
-  },
-
-  // ─── P002: Marcus Johnson — Colles Fracture ───
-  P002: {
-    cbc: () => [
-      { name:"WBC",        value: randRange(8.5,10.5), unit:"K/uL", ref:"4.5-11.0", refLo:4.5, refHi:11.0 },
-      { name:"Hemoglobin", value: randRange(14.2,15.2),unit:"g/dL", ref:"13.5-17.5",refLo:13.5,refHi:17.5 },
-      { name:"Hematocrit", value: randRange(42,46),    unit:"%",    ref:"38.3-48.6",refLo:38.3,refHi:48.6 },
-      { name:"Platelets",  value: randRange(290,330),  unit:"K/uL", ref:"150-400",  refLo:150, refHi:400 },
-    ],
-    bmp: () => [
-      { name:"Sodium",     value: randRange(138,142,0), unit:"mEq/L",ref:"136-145",refLo:136,refHi:145 },
-      { name:"Potassium",  value: randRange(3.8,4.4),   unit:"mEq/L",ref:"3.5-5.0",refLo:3.5,refHi:5.0 },
-      { name:"Creatinine", value: randRange(0.9,1.1),   unit:"mg/dL",ref:"0.7-1.3",refLo:0.7,refHi:1.3 },
-      { name:"Glucose",    value: randRange(95,115,0),   unit:"mg/dL",ref:"70-100", refLo:70, refHi:100 },
-    ],
-    cmp: () => [
-      { name:"Sodium",     value: randRange(138,142,0), unit:"mEq/L",ref:"136-145", refLo:136,refHi:145 },
-      { name:"Potassium",  value: randRange(3.8,4.4),   unit:"mEq/L",ref:"3.5-5.0", refLo:3.5,refHi:5.0 },
-      { name:"Creatinine", value: randRange(0.9,1.1),   unit:"mg/dL",ref:"0.7-1.3", refLo:0.7,refHi:1.3 },
-      { name:"Glucose",    value: randRange(95,115,0),   unit:"mg/dL",ref:"70-100",  refLo:70, refHi:100 },
-      { name:"AST",        value: randRange(20,32,0),    unit:"U/L",  ref:"10-40",   refLo:10, refHi:40 },
-      { name:"ALT",        value: randRange(18,28,0),    unit:"U/L",  ref:"7-56",    refLo:7,  refHi:56 },
-    ],
-    ptinr: () => [
-      { name:"PT",  value: randRange(11.0,12.5), unit:"sec",ref:"11.0-13.5",refLo:11.0,refHi:13.5 },
-      { name:"INR", value: randRange(0.9,1.0),   unit:"",   ref:"0.9-1.1",  refLo:0.9, refHi:1.1 },
-    ],
-    xrext: () => [{ name:"XR Right Forearm 2-View", value:"Displaced distal radius fracture with dorsal angulation (Colles type). Ulna intact.", unit:"", ref:"",
-      report:"CLINICAL INDICATION: Fall, right arm deformity and pain.\n\nFINDINGS:\nDistal Radius: Displaced transverse fracture of the distal radius approximately 2.5cm proximal to the articular surface with dorsal angulation of approximately 25 degrees and 8mm of dorsal displacement. Comminution of the dorsal cortex is present.\nUlna: Intact. No fracture.\nUlnar styloid: Small avulsion fracture of the ulnar styloid tip.\nCarpal bones: No acute fracture. Alignment preserved.\nSoft tissues: Moderate soft tissue swelling dorsal wrist.\n\nIMPRESSION:\n1. Displaced Colles fracture (distal radius) with dorsal angulation and displacement.\n2. Ulnar styloid tip avulsion.\n3. Recommend orthopedic consultation for reduction and fixation.\n\nCritical finding communicated to ED provider at [time].",
-      flag:"ABNORMAL", cat:"Imaging" }],
-    ts: () => [{ name:"Type and Screen", value:"Type O Positive. Antibody screen negative.", unit:"", ref:"", flag:"NORMAL", cat:"Lab" }],
-    ekg: () => [{ name:"EKG 12-Lead", value:"Normal sinus rhythm at 82 bpm. No ST changes. Normal intervals.", unit:"", ref:"",
-      report:"RATE: 82 bpm\nRHYTHM: Normal sinus\nAXIS: Normal\nINTERVALS: PR 156ms, QRS 84ms, QTc 412ms\nST/T CHANGES: None\n\nINTERPRETATION: Normal EKG.",
-      flag:"NORMAL", cat:"Diagnostic" }],
-    cxr: () => [{ name:"CXR PA/Lateral", value:"No acute cardiopulmonary abnormality.", unit:"", ref:"",
-      report:"FINDINGS: Heart size normal. Lungs clear. No effusion or pneumothorax.\n\nIMPRESSION: Normal chest radiograph.", flag:"NORMAL", cat:"Imaging" }],
-  },
-
-  // ─── P003: Lisa Chen — Pneumonia/COPD ───
-  P003: {
-    cbc: () => [
-      { name:"WBC",        value: randRange(15.5,18.0), unit:"K/uL", ref:"4.5-11.0", refLo:4.5, refHi:11.0 },
-      { name:"Hemoglobin", value: randRange(11.2,12.2), unit:"g/dL", ref:"12.0-16.0",refLo:12.0,refHi:16.0 },
-      { name:"Hematocrit", value: randRange(34,37),     unit:"%",    ref:"36-46",    refLo:36,  refHi:46 },
-      { name:"Platelets",  value: randRange(310,380),   unit:"K/uL", ref:"150-400",  refLo:150, refHi:400 },
-      { name:"Neutrophils", value: randRange(78,88),    unit:"%",    ref:"40-70",    refLo:40,  refHi:70 },
-      { name:"Bands",       value: randRange(8,14,0),   unit:"%",    ref:"0-5",      refLo:0,   refHi:5 },
-    ],
-    cmp: () => [
-      { name:"Sodium",     value: randRange(134,138,0), unit:"mEq/L",ref:"136-145", refLo:136,refHi:145 },
-      { name:"Potassium",  value: randRange(3.6,4.0),   unit:"mEq/L",ref:"3.5-5.0", refLo:3.5,refHi:5.0 },
-      { name:"CO2",        value: randRange(28,33,0),    unit:"mEq/L",ref:"22-28",   refLo:22, refHi:28 },
-      { name:"BUN",        value: randRange(14,20,0),    unit:"mg/dL",ref:"7-20",    refLo:7,  refHi:20 },
-      { name:"Creatinine", value: randRange(0.8,1.0),    unit:"mg/dL",ref:"0.6-1.2", refLo:0.6,refHi:1.2 },
-      { name:"Glucose",    value: randRange(135,155,0),  unit:"mg/dL",ref:"70-100",  refLo:70, refHi:100 },
-      { name:"AST",        value: randRange(22,30,0),    unit:"U/L",  ref:"10-40",   refLo:10, refHi:40 },
-      { name:"ALT",        value: randRange(18,26,0),    unit:"U/L",  ref:"7-56",    refLo:7,  refHi:56 },
-    ],
-    bmp: () => [
-      { name:"Sodium",     value: randRange(134,138,0), unit:"mEq/L",ref:"136-145", refLo:136,refHi:145 },
-      { name:"Potassium",  value: randRange(3.6,4.0),   unit:"mEq/L",ref:"3.5-5.0", refLo:3.5,refHi:5.0 },
-      { name:"Creatinine", value: randRange(0.8,1.0),    unit:"mg/dL",ref:"0.6-1.2", refLo:0.6,refHi:1.2 },
-      { name:"Glucose",    value: randRange(135,155,0),  unit:"mg/dL",ref:"70-100",  refLo:70, refHi:100 },
-    ],
-    procal: () => [{ name:"Procalcitonin", value: randRange(2.0,3.2), unit:"ng/mL", ref:"<0.10", refLo:0, refHi:0.10 }],
-    lactate: () => [{ name:"Lactate", value: randRange(2.4,3.2), unit:"mmol/L", ref:"0.5-2.0", refLo:0.5, refHi:2.0 }],
-    bcx:  () => [{ name:"Blood Culture x2", value:"Pending — no growth at [time elapsed]", unit:"", ref:"", flag:"PENDING", cat:"Lab", isPending:true }],
-    ucx:  () => [{ name:"Urine Culture", value:"Pending", unit:"", ref:"", flag:"PENDING", cat:"Lab", isPending:true }],
-    ua:   () => [
-      { name:"UA — Appearance", value:"Clear", unit:"", ref:"Clear", refLo:null, refHi:null },
-      { name:"UA — WBC",        value:"0-2", unit:"/HPF", ref:"0-5", refLo:0, refHi:5 },
-      { name:"UA — Bacteria",   value:"None", unit:"", ref:"None", refLo:null, refHi:null },
-    ],
-    crp: () => [{ name:"CRP", value: randRange(12,22), unit:"mg/dL", ref:"<0.5", refLo:0, refHi:0.5 }],
-    abg: () => [
-      { name:"ABG pH",   value: randRange(7.32,7.38,2), unit:"",     ref:"7.35-7.45", refLo:7.35, refHi:7.45 },
-      { name:"ABG pCO2", value: randRange(48,56,0),     unit:"mmHg", ref:"35-45",     refLo:35,   refHi:45 },
-      { name:"ABG pO2",  value: randRange(58,66,0),     unit:"mmHg", ref:"80-100",    refLo:80,   refHi:100 },
-      { name:"ABG HCO3", value: randRange(26,30,0),     unit:"mEq/L",ref:"22-26",     refLo:22,   refHi:26 },
-    ],
-    vbg: () => [
-      { name:"VBG pH",   value: randRange(7.30,7.36,2), unit:"",     ref:"7.31-7.41", refLo:7.31, refHi:7.41 },
-      { name:"VBG pCO2", value: randRange(50,60,0),     unit:"mmHg", ref:"41-51",     refLo:41,   refHi:51 },
-    ],
-    cxr: () => [{ name:"CXR PA/Lateral", value:"Right lower lobe consolidation with air bronchograms. Small right pleural effusion.", unit:"", ref:"",
-      report:"CLINICAL INDICATION: Fever, productive cough, dyspnea. History of COPD.\n\nCOMPARISON: None.\n\nFINDINGS:\nLungs: Dense consolidation in the right lower lobe with air bronchograms. No left lung consolidation. Hyperinflation with flattened diaphragms bilaterally consistent with COPD.\nPleura: Small right-sided pleural effusion layering dependently.\nHeart: Normal size.\nMediastinum: Normal.\n\nIMPRESSION:\n1. Right lower lobe pneumonia.\n2. Small right parapneumonic effusion.\n3. Hyperinflated lungs consistent with COPD.",
-      flag:"ABNORMAL", cat:"Imaging" }],
-    ekg: () => [{ name:"EKG 12-Lead", value:"Sinus tachycardia 105 bpm. Right axis deviation. Low voltage in limb leads. P-pulmonale.", unit:"", ref:"",
-      report:"RATE: 105 bpm\nRHYTHM: Sinus tachycardia\nAXIS: Right axis deviation\nINTERVALS: PR 168ms, QRS 86ms, QTc 432ms\nP-WAVE: Peaked P-waves (P-pulmonale) in II, III, aVF\nST/T: No acute ST changes\n\nINTERPRETATION: Sinus tachycardia with findings suggestive of right heart strain/cor pulmonale. Correlate clinically.",
-      flag:"ABNORMAL", cat:"Diagnostic" }],
-  },
-
-  // ─── P004: Robert Williams — Septic Shock ───
-  P004: {
-    cbc: () => [
-      { name:"WBC",        value: randRange(20.0,25.0), unit:"K/uL", ref:"4.5-11.0", refLo:4.5, refHi:11.0 },
-      { name:"Hemoglobin", value: randRange(10.2,11.5), unit:"g/dL", ref:"13.5-17.5",refLo:13.5,refHi:17.5 },
-      { name:"Hematocrit", value: randRange(31,35),     unit:"%",    ref:"38.3-48.6",refLo:38.3,refHi:48.6 },
-      { name:"Platelets",  value: randRange(98,140),    unit:"K/uL", ref:"150-400",  refLo:150, refHi:400 },
-      { name:"Neutrophils", value: randRange(82,92),    unit:"%",    ref:"40-70",    refLo:40,  refHi:70 },
-      { name:"Bands",       value: randRange(12,20,0),  unit:"%",    ref:"0-5",      refLo:0,   refHi:5 },
-    ],
-    cmp: () => [
-      { name:"Sodium",     value: randRange(131,136,0),  unit:"mEq/L",ref:"136-145", refLo:136,refHi:145 },
-      { name:"Potassium",  value: randRange(4.8,5.6),    unit:"mEq/L",ref:"3.5-5.0", refLo:3.5,refHi:5.0 },
-      { name:"CO2",        value: randRange(16,20,0),     unit:"mEq/L",ref:"22-28",   refLo:22, refHi:28 },
-      { name:"BUN",        value: randRange(42,58,0),     unit:"mg/dL",ref:"7-20",    refLo:7,  refHi:20 },
-      { name:"Creatinine", value: randRange(2.5,3.2),     unit:"mg/dL",ref:"0.6-1.2", refLo:0.6,refHi:1.2 },
-      { name:"Glucose",    value: randRange(65,85,0),     unit:"mg/dL",ref:"70-100",  refLo:70, refHi:100 },
-      { name:"AST",        value: randRange(68,95,0),     unit:"U/L",  ref:"10-40",   refLo:10, refHi:40 },
-      { name:"ALT",        value: randRange(52,78,0),     unit:"U/L",  ref:"7-56",    refLo:7,  refHi:56 },
-      { name:"Alk Phos",   value: randRange(110,150,0),   unit:"U/L",  ref:"44-147",  refLo:44, refHi:147 },
-      { name:"Total Bilirubin", value:randRange(1.8,2.8), unit:"mg/dL",ref:"0.1-1.2", refLo:0.1,refHi:1.2 },
-      { name:"Albumin",    value: randRange(2.2,2.8),     unit:"g/dL", ref:"3.5-5.0", refLo:3.5,refHi:5.0 },
-    ],
-    bmp: () => [
-      { name:"Sodium",     value: randRange(131,136,0),  unit:"mEq/L",ref:"136-145", refLo:136,refHi:145 },
-      { name:"Potassium",  value: randRange(4.8,5.6),    unit:"mEq/L",ref:"3.5-5.0", refLo:3.5,refHi:5.0 },
-      { name:"Creatinine", value: randRange(2.5,3.2),     unit:"mg/dL",ref:"0.6-1.2", refLo:0.6,refHi:1.2 },
-      { name:"Glucose",    value: randRange(65,85,0),     unit:"mg/dL",ref:"70-100",  refLo:70, refHi:100 },
-    ],
-    lactate: () => [{ name:"Lactate", value: randRange(4.0,5.5), unit:"mmol/L", ref:"0.5-2.0", refLo:0.5, refHi:2.0 }],
-    procal:  () => [{ name:"Procalcitonin", value: randRange(10,18), unit:"ng/mL", ref:"<0.10", refLo:0, refHi:0.10 }],
-    bcx:     () => [{ name:"Blood Culture x2", value:"Pending — no growth at [time elapsed]", unit:"", ref:"", flag:"PENDING", cat:"Lab", isPending:true,
-      pendingFinal: { value:"POSITIVE: E. coli — pan-sensitive", flag:"CRITICAL", delay: 120000 } }],
-    ucx:     () => [{ name:"Urine Culture", value:"Pending", unit:"", ref:"", flag:"PENDING", cat:"Lab", isPending:true,
-      pendingFinal: { value:">100,000 CFU/mL E. coli — pan-sensitive", flag:"ABNORMAL", delay: 100000 } }],
-    ua: () => [
-      { name:"UA — Appearance",  value:"Cloudy",    unit:"", ref:"Clear",  refLo:null, refHi:null },
-      { name:"UA — Color",       value:"Dark amber", unit:"", ref:"Yellow", refLo:null, refHi:null },
-      { name:"UA — Nitrites",    value:"Positive",   unit:"", ref:"Negative", flag:"ABNORMAL" },
-      { name:"UA — Leuk Esterase", value:"3+",       unit:"", ref:"Negative", flag:"ABNORMAL" },
-      { name:"UA — WBC",         value:">100",       unit:"/HPF", ref:"0-5",  refLo:0, refHi:5 },
-      { name:"UA — Bacteria",    value:"3+",         unit:"", ref:"None",     flag:"ABNORMAL" },
-      { name:"UA — RBC",         value:"5-10",       unit:"/HPF", ref:"0-3",  refLo:0, refHi:3 },
-    ],
-    ptinr: () => [
-      { name:"PT",  value: randRange(14.5,16.5), unit:"sec", ref:"11.0-13.5", refLo:11.0, refHi:13.5 },
-      { name:"INR", value: randRange(1.3,1.5),   unit:"",    ref:"0.9-1.1",   refLo:0.9,  refHi:1.1 },
-    ],
-    fib: () => [{ name:"Fibrinogen", value: randRange(480,620,0), unit:"mg/dL", ref:"200-400", refLo:200, refHi:400 }],
-    vbg: () => [
-      { name:"VBG pH",   value: randRange(7.24,7.30,2), unit:"",     ref:"7.31-7.41", refLo:7.31, refHi:7.41 },
-      { name:"VBG pCO2", value: randRange(32,38,0),     unit:"mmHg", ref:"41-51",     refLo:41,   refHi:51 },
-      { name:"VBG Lactate", value: randRange(4.0,5.5),  unit:"mmol/L",ref:"0.5-2.0",  refLo:0.5,  refHi:2.0 },
-    ],
-    cxr: () => [{ name:"CXR Portable AP", value:"Low lung volumes. No focal consolidation. Mild pulmonary vascular congestion.", unit:"", ref:"",
-      report:"CLINICAL INDICATION: Sepsis, evaluate for pneumonia.\n\nFINDINGS:\nHeart: Top normal size (limited by AP technique).\nLungs: Low lung volumes. No focal consolidation. Mild perihilar vascular congestion. No pleural effusion.\n\nIMPRESSION: No pneumonia. Mild pulmonary vascular congestion — correlate with fluid status.",
-      flag:"ABNORMAL", cat:"Imaging" }],
-    ekg: () => [{ name:"EKG 12-Lead", value:"Atrial fibrillation with rapid ventricular response at 118 bpm. Nonspecific ST-T changes. Left axis.", unit:"", ref:"",
-      report:"RATE: 118 bpm (ventricular)\nRHYTHM: Atrial fibrillation\nAXIS: Left axis deviation\nINTERVALS: QRS 92ms, QTc 468ms\nST/T: Diffuse nonspecific ST-T wave changes\nOTHER: No acute ST elevation. Low voltage in limb leads.\n\nINTERPRETATION: AFib with RVR. Nonspecific ST-T changes — may be rate-related vs demand ischemia in setting of sepsis.",
-      flag:"ABNORMAL", cat:"Diagnostic" }],
-  },
+/* ─── PHARMACOLOGY ENGINE ───
+   Each med entry: onset (ms), peak (ms), duration (ms), effects on vitals.
+   Effects are DELTA values applied gradually over onset→peak→duration.
+   Multiple meds stack. Negative values decrease, positive increase. */
+const PHARMACOLOGY={
+  // Analgesics
+  "Morphine 4mg IV":{onset:3e3,peak:15e3,dur:90e3,fx:{hr:-8,sbp:-12,dbp:-6,rr:-3,pain:-4},warn:"Monitor for respiratory depression. Hold if RR < 10."},
+  "Fentanyl 50mcg IV":{onset:2e3,peak:8e3,dur:45e3,fx:{hr:-5,sbp:-8,dbp:-4,rr:-3,pain:-5},warn:"Rapid onset. Monitor respiratory status."},
+  "Ketorolac 30mg IV":{onset:8e3,peak:30e3,dur:120e3,fx:{pain:-3},warn:"Avoid in renal impairment, GI bleed risk. Max 5 days."},
+  "Acetaminophen 1000mg":{onset:10e3,peak:40e3,dur:150e3,fx:{temp:-1.2,pain:-2},warn:"Max 4g/day. Check for hepatic impairment."},
+  // Cardiac
+  "Metoprolol 5mg IV":{onset:3e3,peak:12e3,dur:120e3,fx:{hr:-18,sbp:-15,dbp:-8},warn:"Hold if HR<60 or SBP<100. Monitor for bronchospasm in asthmatics."},
+  "Nitroglycerin 0.4mg SL":{onset:2e3,peak:5e3,dur:20e3,fx:{sbp:-20,dbp:-12,pain:-3},warn:"Contraindicated if SBP<90 or if PDE5 inhibitor used in 24-48hr."},
+  "Aspirin 325mg PO":{onset:15e3,peak:40e3,dur:600e3,fx:{},warn:"Give immediately in ACS. Check for allergy/bleeding."},
+  "Heparin bolus IV":{onset:2e3,peak:5e3,dur:60e3,fx:{},warn:"Weight-based dosing. Check baseline PTT. Monitor for HIT."},
+  "Heparin drip IV":{onset:5e3,peak:20e3,dur:999e3,fx:{},warn:"Titrate to PTT 60-80 sec. Check PTT q6h after initiation."},
+  // Pressors
+  "Norepinephrine IV":{onset:2e3,peak:8e3,dur:999e3,fx:{sbp:25,dbp:15,hr:5},warn:"Central line preferred. Titrate to MAP≥65. Monitor for extravasation."},
+  "Epinephrine 0.3mg IM":{onset:2e3,peak:5e3,dur:15e3,fx:{hr:25,sbp:35,dbp:15},warn:"Anaphylaxis dose. May repeat q5-15min."},
+  // Respiratory
+  "Albuterol 2.5mg neb":{onset:3e3,peak:15e3,dur:90e3,fx:{hr:8,spo2:3},warn:"May cause tachycardia and tremor. Monitor K+."},
+  "Methylprednisolone 125mg IV":{onset:15e3,peak:60e3,dur:300e3,fx:{spo2:1},warn:"Monitor glucose. Not immediate onset — takes hours for full effect."},
+  // Antibiotics (no direct vitals effect but clinical importance)
+  "Ceftriaxone 2g IV":{onset:10e3,peak:30e3,dur:600e3,fx:{},warn:"Give within 1hr of sepsis recognition. Check allergies — cross-reactivity with PCN ~1%."},
+  "Azithromycin 500mg IV":{onset:10e3,peak:30e3,dur:600e3,fx:{},warn:"QTc prolongation risk. Monitor with telemetry."},
+  "Piperacillin-Tazobactam 4.5g IV":{onset:10e3,peak:30e3,dur:180e3,fx:{},warn:"β-lactam — check penicillin allergy. Dose-adjust for renal impairment."},
+  "Meropenem 1g IV":{onset:10e3,peak:30e3,dur:240e3,fx:{},warn:"Carbapenem — reserve for resistant organisms. Low cross-reactivity with PCN."},
+  "Vancomycin 1g IV":{onset:15e3,peak:45e3,dur:360e3,fx:{},warn:"Infuse over ≥60min to avoid Red Man Syndrome. Trough levels needed."},
+  // Sedatives/Reversal
+  "Lorazepam 1mg IV":{onset:3e3,peak:10e3,dur:120e3,fx:{hr:-5,rr:-2,sbp:-8},warn:"Respiratory depression risk. Have flumazenil available."},
+  "Naloxone 0.4mg IV":{onset:2e3,peak:5e3,dur:30e3,fx:{rr:6,hr:10},warn:"Short duration — may need repeat doses. Monitor for withdrawal."},
+  // Fluids
+  "Normal Saline 1000mL IV bolus":{onset:5e3,peak:20e3,dur:120e3,fx:{sbp:10,dbp:5,hr:-5},warn:"Monitor for fluid overload in CHF patients. Reassess after each bolus."},
+  "Lactated Ringer's 1000mL IV bolus":{onset:5e3,peak:20e3,dur:120e3,fx:{sbp:10,dbp:5,hr:-5},warn:"Preferred in sepsis resuscitation."},
+  "Furosemide 40mg IV":{onset:5e3,peak:20e3,dur:120e3,fx:{sbp:-10,dbp:-5},warn:"Monitor K+, Mg+. May worsen renal function."},
+  // Antiemetic
+  "Ondansetron 4mg IV":{onset:5e3,peak:15e3,dur:120e3,fx:{},warn:"QTc prolongation. Max 16mg/day."},
 };
 
-// Fallback generic results for any order not specifically mapped
-const GENERIC_RESULTS = {
-  lipase:  () => [{ name:"Lipase", value: randRange(15,55,0), unit:"U/L", ref:"0-60", refLo:0, refHi:60 }],
-  ddimer:  () => [{ name:"D-Dimer", value: randRange(0.2,0.4), unit:"mg/L FEU", ref:"<0.50", refLo:0, refHi:0.50 }],
-  ts:      () => [{ name:"Type and Screen", value:"Pending crossmatch", unit:"", ref:"", flag:"PENDING", cat:"Lab", isPending:true }],
-  uds:     () => [{ name:"Urine Drug Screen", value:"Negative all panels", unit:"", ref:"Negative", flag:"NORMAL", cat:"Lab" }],
-  ammonia: () => [{ name:"Ammonia", value: randRange(18,35,0), unit:"umol/L", ref:"15-45", refLo:15, refHi:45 }],
-  esr:     () => [{ name:"ESR", value: randRange(10,25,0), unit:"mm/hr", ref:"0-20", refLo:0, refHi:20 }],
-  crp:     () => [{ name:"CRP", value: randRange(0.2,0.8), unit:"mg/dL", ref:"<0.5", refLo:0, refHi:0.5 }],
-  tsh:     () => [{ name:"TSH", value: randRange(1.2,3.8), unit:"mIU/L", ref:"0.4-4.0", refLo:0.4, refHi:4.0 }],
-  a1c:     () => [{ name:"HbA1c", value: randRange(5.0,5.6), unit:"%", ref:"<5.7", refLo:0, refHi:5.7 }],
-  mag:     () => [{ name:"Magnesium", value: randRange(1.8,2.1), unit:"mg/dL", ref:"1.7-2.2", refLo:1.7, refHi:2.2 }],
-  phos:    () => [{ name:"Phosphorus", value: randRange(2.8,4.2), unit:"mg/dL", ref:"2.5-4.5", refLo:2.5, refHi:4.5 }],
-  ptt:     () => [{ name:"PTT", value: randRange(26,34,0), unit:"sec", ref:"25-35", refLo:25, refHi:35 }],
-  fib:     () => [{ name:"Fibrinogen", value: randRange(220,350,0), unit:"mg/dL", ref:"200-400", refLo:200, refHi:400 }],
-  cthead:  () => [{ name:"CT Head w/o Contrast", value:"No acute intracranial abnormality.", unit:"", ref:"",
-    report:"FINDINGS: No hemorrhage, mass, or midline shift. Ventricles normal in size. Age-appropriate parenchymal volume loss. No acute territorial infarct.\n\nIMPRESSION: No acute intracranial process.", flag:"NORMAL", cat:"Imaging" }],
-  ctap:    () => [{ name:"CT Abdomen/Pelvis w/ Contrast", value:"No acute abdominal pathology.", unit:"", ref:"",
-    report:"FINDINGS: Liver, spleen, pancreas, adrenals, and kidneys are unremarkable. No free fluid. No lymphadenopathy. Bowel gas pattern is nonobstructive.\n\nIMPRESSION: No acute abdominal or pelvic pathology.", flag:"NORMAL", cat:"Imaging" }],
-  ctape:   () => [{ name:"CTA Chest (PE Protocol)", value:"No pulmonary embolism.", unit:"", ref:"",
-    report:"FINDINGS: No filling defect in the main, lobar, segmental, or subsegmental pulmonary arteries. Heart chambers normal. No pericardial effusion.\n\nIMPRESSION: No pulmonary embolism.", flag:"NORMAL", cat:"Imaging" }],
-  ctcsp:   () => [{ name:"CT C-Spine w/o Contrast", value:"No acute fracture or malalignment.", unit:"", ref:"",
-    report:"FINDINGS: Vertebral body heights and alignment preserved C1-C7. No fracture. Disc spaces maintained. Prevertebral soft tissues normal.\n\nIMPRESSION: No acute cervical spine injury.", flag:"NORMAL", cat:"Imaging" }],
-  usruq:   () => [{ name:"US RUQ", value:"Gallbladder normal. No biliary dilation.", unit:"", ref:"",
-    report:"FINDINGS: Gallbladder is normal in size without wall thickening or pericholecystic fluid. No gallstones. CBD measures 4mm. Liver is normal in echotexture.\n\nIMPRESSION: Normal right upper quadrant ultrasound.", flag:"NORMAL", cat:"Imaging" }],
-  xrpelvis:() => [{ name:"XR Pelvis AP", value:"No fracture or dislocation.", unit:"", ref:"",
-    report:"FINDINGS: Bony pelvis intact. Hip joints maintained. No fracture or dislocation.\n\nIMPRESSION: Normal pelvis radiograph.", flag:"NORMAL", cat:"Imaging" }],
-  fast:    () => [{ name:"US FAST Exam", value:"Negative — no free fluid.", unit:"", ref:"",
-    report:"FINDINGS:\nRUQ (Morison's): No free fluid.\nLUQ (Splenorenal): No free fluid.\nPelvis (Suprapubic): No free fluid.\nSubxiphoid: No pericardial effusion.\n\nIMPRESSION: Negative FAST exam.", flag:"NORMAL", cat:"Imaging" }],
-  echo:    () => [{ name:"Bedside Echo", value:"EF ~55%. No pericardial effusion. No RV dilation.", unit:"", ref:"",
-    report:"BEDSIDE LIMITED ECHOCARDIOGRAM\nLV function: Grossly normal, EF estimated 55%.\nRV: Normal size and function.\nPericardium: No effusion.\nIVC: Normal diameter with respiratory variation.\n\nIMPRESSION: Grossly normal cardiac function. No effusion.", flag:"NORMAL", cat:"Diagnostic" }],
-  lp:      () => [
-    { name:"CSF — Appearance", value:"Clear, colorless", unit:"", ref:"Clear", flag:"NORMAL", cat:"Lab" },
-    { name:"CSF — WBC",        value:"2",   unit:"/uL", ref:"0-5",   refLo:0, refHi:5 },
-    { name:"CSF — RBC",        value:"0",   unit:"/uL", ref:"0",     refLo:0, refHi:0 },
-    { name:"CSF — Protein",    value:"32",  unit:"mg/dL", ref:"15-45", refLo:15, refHi:45 },
-    { name:"CSF — Glucose",    value:"65",  unit:"mg/dL", ref:"40-80", refLo:40, refHi:80 },
+/* ─── CLINICAL RULES ENGINE ───
+   Checks run on every order placement.
+   Returns {ok:bool, type:"error"|"warning"|"info", msg:string} */
+const CLINICAL_RULES=[
+  // Allergy checks
+  {check:(order,pt)=>{
+    const name=order.name.toLowerCase();
+    for(const a of pt.allergies){
+      const ag=a.agent.toLowerCase();
+      // Direct match
+      if(name.includes(ag)) return{ok:false,type:"error",msg:`⛔ ALLERGY ALERT: Patient allergic to ${a.agent} (${a.rxn}). Order blocked.`,block:true};
+      // Cross-reactivity: penicillin → cephalosporins
+      if(ag==="penicillin"&&(name.includes("cefazolin")||name.includes("ceftriaxone")||name.includes("cephalexin")))
+        return{ok:false,type:"warning",msg:`⚠ CROSS-REACTIVITY: Patient has Penicillin allergy (${a.rxn}). Cephalosporin ordered — ~1-2% cross-reactivity risk. Proceed with caution. Consider carbapenem alternative.`};
+      if(ag==="penicillin"&&(name.includes("piperacillin")||name.includes("amoxicillin")||name.includes("ampicillin")))
+        return{ok:false,type:"error",msg:`⛔ ALLERGY: Patient allergic to ${a.agent} — ${order.name} is a penicillin-class antibiotic. Order blocked.`,block:true};
+      // Vancomycin + Red Man
+      if(ag==="vancomycin"&&name.includes("vancomycin"))
+        return{ok:false,type:"error",msg:`⛔ ALLERGY: Patient has Vancomycin allergy (${a.rxn}). Consider linezolid or daptomycin alternative.`,block:true};
+      // Sulfa
+      if(ag==="sulfa"&&(name.includes("sulfamethoxazole")||name.includes("bactrim")||name.includes("tmp-smx")))
+        return{ok:false,type:"error",msg:`⛔ ALLERGY: Patient allergic to Sulfa drugs. Order blocked.`,block:true};
+    }
+    return null;
+  }},
+  // Renal dosing
+  {check:(order,pt)=>{
+    if(!pt._creatinine) return null;
+    const cr=pt._creatinine;
+    const name=order.name.toLowerCase();
+    if(cr>1.5&&name.includes("ketorolac"))return{ok:false,type:"error",msg:`⛔ CONTRAINDICATED: Ketorolac with Creatinine ${cr} (renal impairment). Use acetaminophen instead.`,block:true};
+    if(cr>2.0&&name.includes("metformin"))return{ok:false,type:"warning",msg:`⚠ Metformin may be contraindicated with Cr ${cr}. Risk of lactic acidosis.`};
+    if(cr>1.5&&(name.includes("meropenem")||name.includes("vancomycin")))return{ok:false,type:"warning",msg:`⚠ DOSE ADJUSTMENT: ${order.name} — patient has renal impairment (Cr ${cr}). Verify dose.`};
+    return null;
+  }},
+  // Hypotension checks
+  {check:(order,pt)=>{
+    const v=pt.vitals[pt.vitals.length-1];if(!v)return null;
+    const sbp=parseInt(v.bp.split("/")[0]);
+    const name=order.name.toLowerCase();
+    if(sbp<90&&name.includes("nitroglycerin"))return{ok:false,type:"error",msg:`⛔ CONTRAINDICATED: Nitroglycerin with SBP ${sbp}. Patient is hypotensive.`,block:true};
+    if(sbp<90&&name.includes("metoprolol"))return{ok:false,type:"error",msg:`⛔ HOLD: Metoprolol with SBP ${sbp}. Will worsen hypotension.`,block:true};
+    if(sbp<100&&name.includes("furosemide"))return{ok:false,type:"warning",msg:`⚠ Caution: Furosemide with SBP ${sbp}. May worsen hypotension.`};
+    if(sbp<90&&name.includes("lisinopril"))return{ok:false,type:"error",msg:`⛔ HOLD: ACE inhibitor with SBP ${sbp}.`,block:true};
+    return null;
+  }},
+  // Bradycardia checks
+  {check:(order,pt)=>{
+    const v=pt.vitals[pt.vitals.length-1];if(!v)return null;
+    if(v.hr<60&&order.name.toLowerCase().includes("metoprolol"))return{ok:false,type:"error",msg:`⛔ HOLD: Beta-blocker with HR ${v.hr}. Risk of symptomatic bradycardia.`,block:true};
+    return null;
+  }},
+  // Respiratory depression
+  {check:(order,pt)=>{
+    const v=pt.vitals[pt.vitals.length-1];if(!v)return null;
+    if(v.rr<10&&(order.name.toLowerCase().includes("morphine")||order.name.toLowerCase().includes("fentanyl")||order.name.toLowerCase().includes("lorazepam")))
+      return{ok:false,type:"error",msg:`⛔ HOLD: Respiratory depressant with RR ${v.rr}. Consider naloxone if opioid-related.`,block:true};
+    return null;
+  }},
+  // CHF + fluids
+  {check:(order,pt)=>{
+    if(!pt.problems.some(p=>p.toLowerCase().includes("chf")||p.toLowerCase().includes("heart failure")))return null;
+    const name=order.name.toLowerCase();
+    if(name.includes("saline")&&name.includes("bolus")||name.includes("ringer")&&name.includes("bolus"))
+      return{ok:false,type:"warning",msg:`⚠ CAUTION: IV fluid bolus in patient with CHF (${pt.problems.find(p=>p.toLowerCase().includes("chf")||p.toLowerCase().includes("heart failure"))}). Risk of pulmonary edema. Consider smaller volumes or pressors.`};
+    return null;
+  }},
+  // Duplicate order
+  {check:(order,pt,existingOrders)=>{
+    if(!existingOrders)return null;
+    const dup=existingOrders.find(o=>o.name===order.name&&!o.cancelled&&!o.resulted&&(Date.now()-o.placedAt)<180000);
+    if(dup)return{ok:false,type:"warning",msg:`⚠ DUPLICATE: ${order.name} was already ordered ${Math.round((Date.now()-dup.placedAt)/1000)}s ago. Are you sure?`};
+    return null;
+  }},
+];
+
+/* ─── SCENARIO EVENTS ───
+   Timed + conditional events per patient. These fire as the sim runs.
+   type: "page" (nurse pages you), "callback" (consult calls back),
+         "deterioration" (patient worsens), "update" (lab/status update),
+         "reminder" (clinical reminder if action not taken) */
+const SCENARIO_EVENTS={
+  P1:[ // Elena Martinez — NSTEMI
+    {id:"e1",delay:15e3,type:"page",from:"RN Sarah",msg:"Dr., patient is asking for more pain medication. Current pain 8/10. She's getting anxious. Last vitals: HR 102, BP 168/94.",cond:null},
+    {id:"e2",delay:30e3,type:"reminder",msg:"⏰ REMINDER: Serial Troponin due. If initial troponin was positive, repeat troponin should be ordered q3-6h to trend.",cond:(pt,orders)=>!orders.some(o=>o.resultKey==="trop"&&!o.cancelled)},
+    {id:"e3",delay:45e3,type:"page",from:"RN Sarah",msg:"BP still elevated 165/92. Patient diaphoretic. Are we giving nitro or metoprolol? Cardiology is going to ask what we've started.",cond:(pt,orders)=>!orders.some(o=>o.name.toLowerCase().includes("metoprolol")||o.name.toLowerCase().includes("nitroglycerin"))},
+    {id:"e4",delay:60e3,type:"callback",from:"Cardiology Fellow (Dr. Patel)",msg:"Hey, I got the consult for your NSTEMI. Troponin 0.42 — is it trending? Did you start heparin and dual antiplatelet? We'd like serial trops q3h, and if the next one is rising we'll probably take her to the cath lab. Make sure she's on tele and has a type & screen. What's her GFR — may need to adjust contrast protocol.",cond:null},
+    {id:"e5",delay:90e3,type:"deterioration",msg:"⚠ PATIENT DETERIORATING: Elena is now having 9/10 chest pain with new diaphoresis. EKG shows deeper ST depression. HR 110, BP 178/96.",vitalChanges:{hr:110,sbp:178,dbp:96,pain:9},cond:(pt,orders)=>{
+      const hasBB=orders.some(o=>(o.name.toLowerCase().includes("metoprolol")||o.name.toLowerCase().includes("heparin"))&&!o.cancelled);
+      return!hasBB; // deteriorates if no beta-blocker or anticoagulation started
+    }},
+    {id:"e6",delay:120e3,type:"page",from:"RN Sarah",msg:"Glucose came back 224. Should I give insulin? She's on metformin at home but NPO now. Also her creatinine was 1.4 — nephro flag per protocol.",cond:null},
+    {id:"e7",delay:70e3,type:"page",from:"Charge RN",msg:"Bay 12 nurse is asking about tele monitoring order. Patient is cardiac but I don't see telemetry ordered.",cond:(pt,orders)=>!orders.some(o=>o.name.toLowerCase().includes("telemetry")&&!o.cancelled)},
+    {id:"e8",delay:50e3,type:"reminder",msg:"⏰ Have you ordered an EKG? Standard workup for chest pain includes 12-lead EKG within 10 minutes of arrival.",cond:(pt,orders)=>!orders.some(o=>o.resultKey==="ekg"&&!o.cancelled)},
+  ],
+  P2:[ // Marcus Johnson — Colles Fracture
+    {id:"e1",delay:12e3,type:"page",from:"RN Mike",msg:"Patient requesting pain medication. He's splinted but pain is 9/10. He's allergic to codeine (nausea) — what analgesic do you want?",cond:null},
+    {id:"e2",delay:35e3,type:"callback",from:"Ortho Resident (Dr. Kim)",msg:"Got your consult for the Colles fracture. I'm looking at the films — it's pretty displaced, probably needs ORIF. Is he NPO? When was his last meal? We'll need a type & screen, CBC, BMP, and pre-op EKG since he's 40. Any blood thinners? Can you get consent for procedural sedation for reduction in the meantime?",cond:null},
+    {id:"e3",delay:55e3,type:"page",from:"RN Mike",msg:"Hey doc, this patient's tetanus status is unknown and he has an open laceration. Should I give Tdap? Also the laceration needs to be irrigated and closed — do you want to do it or should I set up a suture tray?",cond:null},
+    {id:"e4",delay:25e3,type:"reminder",msg:"⏰ Fracture with skin break — has antibiotic prophylaxis been ordered? Cefazolin 2g IV is standard for open fracture prophylaxis.",cond:(pt,orders)=>!orders.some(o=>o.name.toLowerCase().includes("cefazolin")&&!o.cancelled)},
+    {id:"e5",delay:80e3,type:"page",from:"RN Mike",msg:"Patient's girlfriend is here asking about the plan. She's anxious. Also he says he ate a sandwich about 2 hours ago — ortho will want to know for anesthesia.",cond:null},
+  ],
+  P3:[ // Lisa Chen — Pneumonia/COPD
+    {id:"e1",delay:10e3,type:"page",from:"RN Diana",msg:"SpO2 dropped to 86% on 2L NC. She's using accessory muscles and can barely finish sentences. Should I increase O2? She's getting agitated.",cond:null},
+    {id:"e2",delay:25e3,type:"reminder",msg:"⏰ SEPSIS ALERT: This patient meets SIRS criteria (Temp 101.8, HR 108, RR 28, WBC pending). SEP-1 bundle: Lactate, blood cultures, and antibiotics within 1 hour.",cond:(pt,orders)=>{
+      const hasAbx=orders.some(o=>(o.name.toLowerCase().includes("ceftriaxone")||o.name.toLowerCase().includes("azithromycin")||o.name.toLowerCase().includes("piperacillin"))&&!o.cancelled);
+      const hasBCx=orders.some(o=>o.resultKey==="bcx"&&!o.cancelled);
+      const hasLactate=orders.some(o=>o.resultKey==="lactate"&&!o.cancelled);
+      return !(hasAbx&&hasBCx&&hasLactate);
+    }},
+    {id:"e3",delay:45e3,type:"deterioration",msg:"⚠ WORSENING: Lisa's SpO2 88% on 4L NC. RR 30. Becoming more confused. ABG shows respiratory acidosis. Consider BiPAP or escalation.",vitalChanges:{spo2:88,rr:30,hr:112},cond:(pt,orders)=>{
+      const hasNeb=orders.some(o=>o.name.toLowerCase().includes("albuterol")&&!o.cancelled);
+      const hasSteroid=orders.some(o=>o.name.toLowerCase().includes("methylprednisolone")&&!o.cancelled);
+      return !(hasNeb&&hasSteroid);
+    }},
+    {id:"e4",delay:60e3,type:"callback",from:"Pulm/CC Fellow (Dr. Rivera)",msg:"Got the consult on your COPD exacerbation with pneumonia. Sounds like she may need ICU if she doesn't improve on BiPAP. Has she gotten steroids and nebs? What's her lactate? Procal? I'd get an ABG if you haven't already. If she tires out we may need to intubate — have RT on standby.",cond:null},
+    {id:"e5",delay:35e3,type:"page",from:"RN Diana",msg:"Respiratory therapy is here and asking what nebulizer treatments are ordered. I don't see albuterol or ipratropium in the system yet.",cond:(pt,orders)=>!orders.some(o=>o.name.toLowerCase().includes("albuterol")&&!o.cancelled)},
+    {id:"e6",delay:75e3,type:"page",from:"RN Diana",msg:"Blood cultures drawn. Should I put in a second IV for the antibiotics? She only has one 20g in the hand.",cond:null},
+    {id:"e7",delay:20e3,type:"page",from:"Infection Control",msg:"Heads up — this patient is on droplet precautions. Influenza/COVID PCR has been ordered per protocol. Please ensure proper PPE for all staff entering the room.",cond:null},
+  ],
+  P4:[ // Robert Williams — Septic Shock
+    {id:"e1",delay:8e3,type:"page",from:"ICU RN Janelle",msg:"MAP is 53 on norepinephrine 0.1 mcg/kg/min. Should I titrate up? He's on 30mL/hr maintenance fluids. Last lactate was 4.6 — repeat hasn't been ordered yet.",cond:null},
+    {id:"e2",delay:20e3,type:"page",from:"ICU RN Janelle",msg:"Family is at bedside — his daughter is asking to speak with the doctor about prognosis and code status. She's very emotional. When can you come by?",cond:null},
+    {id:"e3",delay:35e3,type:"reminder",msg:"⏰ SEP-1 BUNDLE: Repeat lactate should be ordered within 6 hours if initial lactate >2. Current lactate 4.6. Have antibiotics been verified and administered?",cond:(pt,orders)=>{
+      const hasRepeatLactate=orders.filter(o=>o.resultKey==="lactate"&&!o.cancelled).length>=1;
+      return !hasRepeatLactate;
+    }},
+    {id:"e4",delay:50e3,type:"deterioration",msg:"⚠ CRITICAL: Robert's MAP dropped to 48. Norepinephrine at max dose 0.3 mcg/kg/min. Consider adding vasopressin or stress-dose hydrocortisone. Urine output <0.5 mL/kg/hr × 2hrs.",vitalChanges:{sbp:72,dbp:42,hr:125,spo2:91},cond:(pt,orders)=>{
+      const hasHydro=orders.some(o=>o.name.toLowerCase().includes("hydrocortisone")&&!o.cancelled);
+      return !hasHydro;
+    }},
+    {id:"e5",delay:70e3,type:"callback",from:"ID Attending (Dr. Okonkwo)",msg:"Reviewed the case — UTI-source septic shock in an 81yo with recurrent UTIs. Meropenem is a good choice given his history. I'd add a repeat UA with culture sensitivity when it comes back. Watch for C. diff given broad spectrum. Any concern for endocarditis given the sustained bacteremia? Consider echo if cultures remain positive at 48h.",cond:null},
+    {id:"e6",delay:40e3,type:"page",from:"ICU RN Janelle",msg:"Apixaban is on his home med list — it's been held since admission but wanted to confirm. Also, Cr is 2.8 up from baseline 1.8 — should we consult nephro for the AKI?",cond:null},
+    {id:"e7",delay:100e3,type:"page",from:"Lab",msg:"🔬 CRITICAL VALUE CALL: Blood culture at 18 hours growing gram-negative rods. Preliminary identification: E. coli. Final sensitivities pending.",cond:null},
   ],
 };
 
-
-// ─── SEED PATIENTS ───
-const SEED_PATIENTS = [
-  {
-    id:"P001", name:"Martinez, Elena", mrn:"MRN-482910", dob:"1958-03-14", age:67, sex:"F",
-    location:"ED-Bay 12", encounter:"ENC-90421", status:"Active", acuity:"ESI-2",
-    chief:"Chest pain, diaphoresis × 2 hrs",
-    triage:"67F presenting with acute onset substernal chest pain radiating to left arm with associated diaphoresis and nausea. Pain started 2 hours ago while at rest. Hx HTN, DM2, HLD. Takes ASA 81mg daily. Pain is 8/10, pressure-like. EKG obtained at triage showing ST depression V3-V6.",
-    allergies:[
-      { agent:"Penicillin", reaction:"Anaphylaxis", severity:"High" },
-      { agent:"Sulfa drugs", reaction:"Rash/Urticaria", severity:"Moderate" },
+/* ─── ADMISSION CALLBACKS ───
+   When user tries to admit, the admitting team responds contextually */
+const ADMIT_CALLBACKS={
+  P1:{
+    service:"Cardiology",
+    acceptMsg:"Cardiology accepting. Dr. Patel will be the admitting fellow. We'll take her to the CCU pending cath in the morning. Please make sure heparin drip is running and titrated, serial trops are ordered, and she stays NPO after midnight. We'll need the EKG, troponin trend, and echocardiogram results. Good catch on the NSTEMI.",
+    rejectConditions:[
+      {cond:(pt,orders)=>!orders.some(o=>o.name.toLowerCase().includes("heparin")&&!o.cancelled),msg:"Cardiology says: We need anticoagulation started before we accept. Please initiate heparin bolus and drip."},
+      {cond:(pt,orders)=>!orders.some(o=>o.resultKey==="trop"&&!o.cancelled),msg:"Cardiology says: We need to see troponin trend before accepting. Please order serial troponins."},
     ],
-    alerts:["Fall Risk","DVT Prophylaxis Required","Cardiac Alert"],
-    problems:["Hypertension","Type 2 Diabetes Mellitus","Hyperlipidemia","GERD","Osteoarthritis bilateral knees","Obesity (BMI 32)"],
-    homeMeds:[
-      { name:"Lisinopril 20mg", route:"PO", freq:"Daily" },
-      { name:"Metformin 1000mg", route:"PO", freq:"BID" },
-      { name:"Atorvastatin 40mg", route:"PO", freq:"QHS" },
-      { name:"Omeprazole 20mg", route:"PO", freq:"Daily" },
-      { name:"Aspirin 81mg", route:"PO", freq:"Daily" },
-      { name:"Amlodipine 5mg", route:"PO", freq:"Daily" },
-    ],
-    vitalsBase:{ hr:102, sbp:168, dbp:94, rr:22, spo2:94, temp:98.8, pain:8 },
-    vitalsHistory:[
-      { time:"14:32", hr:102, bp:"168/94", rr:22, spo2:94, temp:98.8, pain:8, src:"Triage" },
-      { time:"14:50", hr:98,  bp:"162/90", rr:20, spo2:95, temp:98.7, pain:7, src:"RN" },
-      { time:"15:15", hr:94,  bp:"155/88", rr:18, spo2:96, temp:98.6, pain:5, src:"RN" },
-    ],
-    // Pre-seeded results (already resulted at start of sim)
-    preResults:[
-      { name:"Troponin I", value:"0.42", unit:"ng/mL", ref:"<0.04", flag:"CRITICAL", time:"14:45", ack:false, cat:"Lab" },
-      { name:"EKG 12-Lead", value:"ST depression V3-V6. T-wave inversions lateral leads. Sinus tach 98.", flag:"ABNORMAL", time:"14:40", ack:false, cat:"Diagnostic",
-        report:"RATE: 98 bpm\nRHYTHM: Sinus tachycardia\nST: Horizontal ST depression 1-2mm V3-V6\nT-WAVE: Inversions I, aVL, V5-V6\n\nINTERPRETATION: Ischemic changes consistent with NSTEMI." },
-    ],
-    edCourse:"",
-    notes:[],
-    imaging:[],
+    delayMs:[8e3,15e3],
   },
-  {
-    id:"P002", name:"Johnson, Marcus", mrn:"MRN-738201", dob:"1985-11-22", age:40, sex:"M",
-    location:"ED-Bay 5", encounter:"ENC-90422", status:"Active", acuity:"ESI-3",
-    chief:"Fall from ladder — right arm deformity, laceration",
-    triage:"40M fell approximately 8 feet from a ladder while cleaning gutters. Landed on outstretched right hand. Obvious deformity of right distal forearm. 4cm laceration to right forearm, controlled with direct pressure. Neurovascularly intact distally. Tetanus unknown. No LOC, no head strike, no neck pain.",
-    allergies:[{ agent:"Codeine", reaction:"Nausea/Vomiting", severity:"Moderate" }],
-    alerts:["Tetanus Due"],
-    problems:["Asthma (mild intermittent)","Seasonal allergic rhinitis"],
-    homeMeds:[
-      { name:"Albuterol MDI", route:"INH", freq:"PRN" },
-      { name:"Cetirizine 10mg", route:"PO", freq:"Daily" },
+  P2:{
+    service:"Orthopedics",
+    acceptMsg:"Ortho accepting for ORIF in the morning. Dr. Kim will staff. Please keep NPO, continue pain management, make sure pre-op labs (CBC, BMP, T&S, coags) and pre-op EKG are ordered. Cefazolin prophylaxis is good. We'll plan OR for 7AM if the schedule holds.",
+    rejectConditions:[
+      {cond:(pt,orders)=>!orders.some(o=>o.resultKey==="ts"&&!o.cancelled),msg:"Ortho says: We need Type & Screen ordered before we can schedule OR. Please add."},
     ],
-    vitalsBase:{ hr:110, sbp:148, dbp:92, rr:20, spo2:98, temp:98.4, pain:9 },
-    vitalsHistory:[
-      { time:"13:10", hr:110, bp:"148/92", rr:20, spo2:98, temp:98.4, pain:9, src:"Triage" },
-      { time:"13:35", hr:98,  bp:"138/86", rr:18, spo2:99, temp:98.5, pain:7, src:"RN" },
-      { time:"14:00", hr:88,  bp:"132/82", rr:16, spo2:99, temp:98.4, pain:5, src:"RN" },
-    ],
-    preResults:[],
-    edCourse:"",
-    notes:[],
-    imaging:[],
+    delayMs:[10e3,20e3],
   },
-  {
-    id:"P003", name:"Chen, Lisa", mrn:"MRN-219384", dob:"1972-07-08", age:53, sex:"F",
-    location:"ED-Bay 8", encounter:"ENC-90423", status:"Active", acuity:"ESI-2",
-    chief:"Acute dyspnea, productive cough × 3 days, fever 101.8°F",
-    triage:"53F with COPD (moderate, 1ppd × 30yr smoker) presenting with worsening dyspnea and productive cough with yellow-green sputum × 3 days. Fever at home 101.8. SpO2 88% on RA at triage, improved to 91% on 2L NC. Using accessory muscles. Able to speak in short sentences.",
-    allergies:[],
-    alerts:["Isolation: Droplet Precautions","Supplemental O2 Required"],
-    problems:["COPD (moderate — GOLD Stage II)","Current smoker (1 ppd × 30 yrs)","Osteoporosis","Major Depressive Disorder","Vitamin D deficiency"],
-    homeMeds:[
-      { name:"Tiotropium 18mcg inhaler", route:"INH", freq:"Daily" },
-      { name:"Fluticasone/Salmeterol 250/50", route:"INH", freq:"BID" },
-      { name:"Albuterol nebulizer", route:"INH", freq:"PRN" },
-      { name:"Sertraline 100mg", route:"PO", freq:"Daily" },
-      { name:"Alendronate 70mg", route:"PO", freq:"Weekly (Sundays)" },
-      { name:"Vitamin D3 2000 IU", route:"PO", freq:"Daily" },
+  P3:{
+    service:"Pulmonology/Critical Care",
+    acceptMsg:"Pulm/CC accepting to MICU. Dr. Rivera is the attending. Please continue current antibiotics, nebs, steroids. We'll reassess BiPAP vs intubation on arrival. Make sure an ABG is sent and RT is aware. Good sepsis workup.",
+    rejectConditions:[
+      {cond:(pt,orders)=>{
+        const hasAbx=orders.some(o=>(o.name.toLowerCase().includes("ceftriaxone")||o.name.toLowerCase().includes("azithromycin"))&&!o.cancelled);
+        return !hasAbx;
+      },msg:"Pulm/CC says: We need antibiotics started before transfer. This patient meets sepsis criteria — please initiate empiric coverage."},
+      {cond:(pt,orders)=>!orders.some(o=>o.name.toLowerCase().includes("albuterol")&&!o.cancelled),msg:"Pulm/CC says: Has the patient received any bronchodilator therapy? Please start albuterol nebs before transfer."},
     ],
-    vitalsBase:{ hr:108, sbp:130, dbp:78, rr:28, spo2:88, temp:101.8, pain:4 },
-    vitalsHistory:[
-      { time:"12:45", hr:108, bp:"130/78", rr:28, spo2:88, temp:101.8, pain:4, src:"Triage" },
-      { time:"13:15", hr:102, bp:"128/76", rr:24, spo2:91, temp:101.4, pain:3, src:"RN" },
-      { time:"14:00", hr:96,  bp:"126/74", rr:22, spo2:93, temp:100.8, pain:2, src:"RN" },
-    ],
-    preResults:[],
-    edCourse:"",
-    notes:[],
-    imaging:[],
+    delayMs:[12e3,18e3],
   },
-  {
-    id:"P004", name:"Williams, Robert", mrn:"MRN-605827", dob:"1945-01-30", age:81, sex:"M",
-    location:"ICU-Bed 3", encounter:"ENC-90420", status:"Active", acuity:"ESI-1",
-    chief:"Transfer from ED — septic shock, UTI source, on vasopressors",
-    triage:"81M transferred from ED to ICU. Presented with AMS (GCS 13), fever 103.1, hypotension MAP 52. Found to have UTI-source sepsis → septic shock requiring vasopressors. 30mL/kg NS bolus given in ED. Norepinephrine started. Broad-spectrum abx initiated. Foley placed — purulent urine.",
-    allergies:[
-      { agent:"Vancomycin", reaction:"Red Man Syndrome", severity:"Moderate" },
-      { agent:"Iodine contrast", reaction:"Hives/Urticaria", severity:"Moderate" },
-    ],
-    alerts:["Fall Risk","Code Status: FULL CODE","Vasopressors Active","Central Line In Situ","Contact Isolation"],
-    problems:["Benign prostatic hyperplasia","Atrial fibrillation (chronic, on anticoagulation)","CHF — HFrEF (EF 35%)","CKD Stage 3b (baseline Cr 1.8)","Mild Alzheimer's dementia","Recurrent UTIs","Gout"],
-    homeMeds:[
-      { name:"Apixaban 5mg", route:"PO", freq:"BID" },
-      { name:"Carvedilol 12.5mg", route:"PO", freq:"BID" },
-      { name:"Furosemide 40mg", route:"PO", freq:"Daily" },
-      { name:"Tamsulosin 0.4mg", route:"PO", freq:"QHS" },
-      { name:"Donepezil 10mg", route:"PO", freq:"QHS" },
-      { name:"Allopurinol 100mg", route:"PO", freq:"Daily" },
-    ],
-    vitalsBase:{ hr:118, sbp:78, dbp:50, rr:26, spo2:92, temp:103.1, pain:6 },
-    vitalsHistory:[
-      { time:"10:00", hr:118, bp:"78/50",  rr:26, spo2:92, temp:103.1, pain:6, src:"ED Triage" },
-      { time:"11:00", hr:110, bp:"85/55",  rr:24, spo2:94, temp:102.4, pain:5, src:"ED RN" },
-      { time:"12:00", hr:102, bp:"92/60",  rr:22, spo2:95, temp:101.6, pain:4, src:"ICU RN" },
-    ],
-    preResults:[
-      { name:"WBC", value:"22.4", unit:"K/uL", ref:"4.5-11.0", flag:"CRITICAL", time:"10:15", ack:false, cat:"Lab" },
-      { name:"Lactate", value:"4.6", unit:"mmol/L", ref:"0.5-2.0", flag:"CRITICAL", time:"10:15", ack:false, cat:"Lab" },
-      { name:"Creatinine", value:"2.8", unit:"mg/dL", ref:"0.6-1.2", flag:"HIGH", time:"10:20", ack:false, cat:"Lab" },
-      { name:"Procalcitonin", value:"12.8", unit:"ng/mL", ref:"<0.10", flag:"CRITICAL", time:"10:25", ack:false, cat:"Lab" },
-      { name:"Urinalysis", value:"Positive nitrites, >100 WBC, bacteria 3+, leuk esterase 3+", flag:"ABNORMAL", time:"10:30", ack:false, cat:"Lab" },
-      { name:"Blood Cx x2", value:"Pending — no growth", flag:"PENDING", time:"10:10", ack:false, cat:"Lab" },
-    ],
-    edCourse:"81M with hx AFib, HFrEF (EF 35%), CKD3b, BPH presenting with AMS, fever 103.1, hypotension (MAP 52). Found to have UTI source sepsis → septic shock. 30mL/kg IVF bolus given. Started on norepinephrine. Meropenem initiated (VRE risk given recurrent UTIs, avoids vancomycin per allergy). Foley placed — grossly purulent urine. Labs notable for WBC 22.4, lactate 4.6, Cr 2.8 (baseline 1.8), procal 12.8. Transferred to ICU for vasopressor management and close monitoring.",
-    notes:[],
-    imaging:[],
+  P4:{
+    service:"Already in ICU",
+    acceptMsg:null, // Already admitted
+    rejectConditions:[],
+    delayMs:[5e3,8e3],
   },
-];
-
-
-// ─── NOTE TEMPLATES ───
-const NOTE_TEMPLATES = {
-  "ED Provider Note": `CHIEF COMPLAINT: [complaint]
-
-HISTORY OF PRESENT ILLNESS:
-[age][sex] with PMH significant for [problems] who presents to the ED with [complaint].
-
-[Onset, location, duration, character, aggravating/alleviating factors, radiation, timing, severity]
-
-Associated symptoms: [positive/negative pertinents]
-
-REVIEW OF SYSTEMS:
-Constitutional: [+/- fever, chills, weight loss, fatigue]
-HEENT: [findings]
-Cardiovascular: [+/- chest pain, palpitations, edema]
-Pulmonary: [+/- dyspnea, cough, wheezing]
-GI: [+/- nausea, vomiting, abdominal pain, diarrhea]
-GU: [+/- dysuria, frequency, hematuria]
-MSK: [+/- pain, swelling, ROM limitation]
-Neuro: [+/- headache, dizziness, weakness, numbness]
-Psych: [+/- SI/HI, anxiety, depression]
-All other systems reviewed and negative unless noted above.
-
-PHYSICAL EXAMINATION:
-General: [appearance, distress level]
-Vitals: [HR, BP, RR, SpO2, Temp, Pain]
-HEENT: [PERRL, EOMI, TMs, oropharynx]
-Neck: [supple, ROM, JVD, lymphadenopathy]
-Cardiovascular: [rate, rhythm, murmurs, peripheral pulses]
-Pulmonary: [effort, breath sounds, wheezes, rales]
-Abdomen: [soft/rigid, tenderness, distension, BS]
-Extremities: [edema, deformity, pulses, sensation, motor]
-Skin: [color, temperature, moisture, lesions]
-Neurological: [CN II-XII, strength, sensation, gait, coordination]
-
-DIAGNOSTICS:
-[Labs, imaging, EKG interpretation]
-
-EMERGENCY DEPARTMENT COURSE:
-[Interventions, responses, consultations]
-
-MEDICAL DECISION MAKING:
-[Assessment, differential, risk stratification, reasoning]
-
-DIAGNOSIS:
-1. [Primary]
-2. [Secondary]
-
-PLAN:
-[Disposition, orders, consults, follow-up]
-
-ED Attending Physician: _______________
-Time of evaluation: _______________`,
-
-  "Nursing Assessment": `NURSING ASSESSMENT
-Date/Time: [time]
-Patient: [name] | MRN: [mrn]
-Chief Complaint: [complaint]
-
-PRIMARY SURVEY:
-A — Airway: [patent / compromised / intubated]
-B — Breathing: Rate [rr], effort [normal/labored/accessory muscles], SpO2 [spo2]% on [RA/NC/NRB]
-C — Circulation: HR [hr], BP [bp], skin [warm-dry / cool-clammy / mottled], cap refill [<2s / >2s]
-D — Disability: GCS [score] (E__ V__ M__), pupils [PERRL / abnormal]
-E — Exposure: Temp [temp]°F, skin exam [findings]
-
-SECONDARY ASSESSMENT:
-Pain: [location] [scale]/10, [quality: sharp/dull/pressure/burning], [onset, radiation]
-Neuro: [orientation x1-4], [behavior: calm/agitated/confused/obtunded]
-Cardiovascular: [rhythm on monitor], [edema], [IV access: site, gauge, fluids running]
-Respiratory: [breath sounds], [O2 delivery device and flow rate]
-GI/GU: [last BM], [diet tolerance], [foley Y/N, urine output]
-Skin: [integrity], [wounds/surgical sites], [pressure injury risk]
-Safety: [fall risk score], [restraints Y/N], [isolation type], [bed alarm], [side rails]
-
-INTERVENTIONS PERFORMED:
-[ ] IV access obtained — [site, gauge]
-[ ] Labs drawn
-[ ] Medications administered — [list]
-[ ] O2 applied — [device, flow]
-[ ] Monitoring initiated — [tele, pulse ox, etc.]
-[ ] Other: _______________
-
-REASSESSMENT PLAN:
-[Vitals frequency, neuro checks, reassess pain at ___]
-
-Nurse: _______________`,
-
-  "Progress Note": `PROGRESS NOTE
-Date/Time: [datetime]
-Provider: _______________
-
-SUBJECTIVE:
-Patient reports [symptoms/complaints/changes since last assessment].
-[Current pain level, new concerns, response to treatments]
-
-OBJECTIVE:
-Vitals: HR ___ | BP ___/___ | RR ___ | SpO2 ___% on ___ | Temp ___°F
-General: [appearance]
-Pertinent exam: [focused findings relevant to chief complaint]
-New results: [labs, imaging since last note]
-I&O (if applicable): [intake/output]
-
-ASSESSMENT:
-[Problem-based assessment with current status]
-
-PLAN:
-[Changes to orders, new medications, pending results, consultations, disposition update]
-
-Provider: _______________`,
-
-  "Procedure Note": `PROCEDURE NOTE
-
-Procedure: [name]
-Date/Time: [datetime]
-Provider: [name, credentials]
-Indication: [clinical reason]
-Consent: [informed consent obtained — verbal / written / emergency waiver]
-Timeout performed: ☐ Yes — confirmed patient, procedure, site, allergies, antibiotics
-
-PREPARATION:
-Position: [supine / lateral / sitting]
-Sterile technique: [full sterile / clean / NA]
-Anesthesia: [local with ___ / conscious sedation / none]
-Monitoring: [continuous SpO2, cardiac monitor, etc.]
-
-TECHNIQUE:
-[Step-by-step description of procedure performed]
-
-FINDINGS:
-[What was observed during the procedure]
-
-SPECIMENS:
-[Sent to lab / pathology / none]
-
-COMPLICATIONS:
-[None / describe]
-
-ESTIMATED BLOOD LOSS: [volume or minimal]
-
-POST-PROCEDURE:
-[Vitals stable, patient tolerated well, post-procedure orders, monitoring plan]
-[Post-procedure imaging ordered: Y/N]
-
-Provider: _______________`,
-
-  "Discharge Summary": `DISCHARGE SUMMARY
-
-PATIENT: [name] | MRN: [mrn] | DOB: [dob]
-ADMISSION DATE: _______________
-DISCHARGE DATE: _______________
-LENGTH OF STAY: ___ days
-ATTENDING: _______________
-
-DISCHARGE DIAGNOSIS:
-1. [Primary]
-2. [Secondary]
-
-HOSPITAL COURSE:
-[Brief narrative of admission reason, key findings, treatments, and clinical trajectory]
-
-SIGNIFICANT RESULTS:
-[Key lab values, imaging findings, pathology]
-
-PROCEDURES PERFORMED:
-[List with dates]
-
-DISCHARGE MEDICATIONS:
-[Complete list with changes highlighted]
-
-DISCHARGE CONDITION:
-[Stable / Improved / Unchanged]
-Activity: [Restrictions]
-Diet: [Type]
-
-FOLLOW-UP:
-[Provider, specialty, timeframe]
-
-PATIENT EDUCATION:
-[Key instructions, return precautions]
-
-PENDING RESULTS AT DISCHARGE:
-[Cultures, pathology, etc.]
-
-Dictated by: _______________`,
 };
 
+/* ─── ORDER CATALOG ─── */
+const ORDER_CATALOG=[
+  // Labs
+  {id:"L1",name:"CBC with Differential",cat:"lab",sub:"Hematology",rk:"cbc"},
+  {id:"L2",name:"Comprehensive Metabolic Panel",cat:"lab",sub:"Chemistry",rk:"cmp"},
+  {id:"L3",name:"Basic Metabolic Panel",cat:"lab",sub:"Chemistry",rk:"bmp"},
+  {id:"L4",name:"Troponin I",cat:"lab",sub:"Cardiac",rk:"trop"},
+  {id:"L5",name:"BNP",cat:"lab",sub:"Cardiac",rk:"bnp"},
+  {id:"L6",name:"PT/INR",cat:"lab",sub:"Coagulation",rk:"ptinr"},
+  {id:"L7",name:"PTT",cat:"lab",sub:"Coagulation",rk:"ptt"},
+  {id:"L8",name:"Urinalysis",cat:"lab",sub:"Urine",rk:"ua"},
+  {id:"L9",name:"Blood Culture x2",cat:"lab",sub:"Micro",rk:"bcx"},
+  {id:"L10",name:"Lactate",cat:"lab",sub:"Chemistry",rk:"lactate"},
+  {id:"L11",name:"Procalcitonin",cat:"lab",sub:"Chemistry",rk:"procal"},
+  {id:"L12",name:"Lipase",cat:"lab",sub:"Chemistry",rk:"lipase"},
+  {id:"L13",name:"D-Dimer",cat:"lab",sub:"Coagulation",rk:"ddimer"},
+  {id:"L14",name:"Type and Screen",cat:"lab",sub:"Blood Bank",rk:"ts"},
+  {id:"L15",name:"Urine Drug Screen",cat:"lab",sub:"Toxicology",rk:"uds"},
+  {id:"L16",name:"Magnesium",cat:"lab",sub:"Chemistry",rk:"mag"},
+  {id:"L17",name:"Phosphorus",cat:"lab",sub:"Chemistry",rk:"phos"},
+  {id:"L18",name:"ABG (Arterial Blood Gas)",cat:"lab",sub:"Chemistry",rk:"abg"},
+  {id:"L19",name:"VBG (Venous Blood Gas)",cat:"lab",sub:"Chemistry",rk:"vbg"},
+  {id:"L20",name:"Fibrinogen",cat:"lab",sub:"Coagulation",rk:"fib"},
+  {id:"L21",name:"CRP",cat:"lab",sub:"Chemistry",rk:"crp"},
+  {id:"L22",name:"ESR",cat:"lab",sub:"Hematology",rk:"esr"},
+  {id:"L23",name:"HbA1c",cat:"lab",sub:"Chemistry",rk:"a1c"},
+  {id:"L24",name:"TSH",cat:"lab",sub:"Endocrine",rk:"tsh"},
+  {id:"L25",name:"Urine Culture",cat:"lab",sub:"Micro",rk:"ucx"},
+  {id:"L26",name:"Ammonia",cat:"lab",sub:"Chemistry",rk:"ammonia"},
+  // Imaging
+  {id:"I1",name:"CXR PA/Lateral",cat:"imaging",sub:"X-Ray",rk:"cxr"},
+  {id:"I2",name:"CT Head w/o Contrast",cat:"imaging",sub:"CT",rk:"cthead"},
+  {id:"I3",name:"CT Abdomen/Pelvis w/ Contrast",cat:"imaging",sub:"CT",rk:"ctap"},
+  {id:"I4",name:"CT Angiography Chest (PE Protocol)",cat:"imaging",sub:"CT",rk:"ctape"},
+  {id:"I5",name:"XR Extremity 2-view",cat:"imaging",sub:"X-Ray",rk:"xrext"},
+  {id:"I6",name:"Ultrasound RUQ",cat:"imaging",sub:"US",rk:"usruq"},
+  {id:"I7",name:"CT Coronary Angiography",cat:"imaging",sub:"CT",rk:"ctca"},
+  {id:"I8",name:"US FAST Exam",cat:"imaging",sub:"US",rk:"fast"},
+  // Diagnostic
+  {id:"D1",name:"EKG 12-Lead",cat:"diagnostic",sub:"Cardiac",rk:"ekg"},
+  {id:"D2",name:"Bedside Echocardiogram",cat:"diagnostic",sub:"Cardiac",rk:"echo"},
+  // Medications
+  {id:"M1",name:"Normal Saline 1000mL IV bolus",cat:"medication",sub:"IV Fluids"},
+  {id:"M2",name:"Lactated Ringer's 1000mL IV bolus",cat:"medication",sub:"IV Fluids"},
+  {id:"M3",name:"Morphine 4mg IV q4h PRN pain",cat:"medication",sub:"Analgesic"},
+  {id:"M4",name:"Fentanyl 50mcg IV q1h PRN pain",cat:"medication",sub:"Analgesic"},
+  {id:"M5",name:"Ketorolac 30mg IV x1",cat:"medication",sub:"Analgesic"},
+  {id:"M6",name:"Acetaminophen 1000mg PO/IV q6h PRN",cat:"medication",sub:"Analgesic"},
+  {id:"M7",name:"Ondansetron 4mg IV q6h PRN nausea",cat:"medication",sub:"Antiemetic"},
+  {id:"M8",name:"Ceftriaxone 2g IV daily",cat:"medication",sub:"Antibiotic"},
+  {id:"M9",name:"Azithromycin 500mg IV daily",cat:"medication",sub:"Antibiotic"},
+  {id:"M10",name:"Piperacillin-Tazobactam 4.5g IV q6h",cat:"medication",sub:"Antibiotic"},
+  {id:"M11",name:"Vancomycin 1g IV q12h",cat:"medication",sub:"Antibiotic"},
+  {id:"M12",name:"Meropenem 1g IV q8h",cat:"medication",sub:"Antibiotic"},
+  {id:"M13",name:"Metoprolol 5mg IV q5min x3 PRN",cat:"medication",sub:"Cardiac"},
+  {id:"M14",name:"Nitroglycerin 0.4mg SL PRN chest pain",cat:"medication",sub:"Cardiac"},
+  {id:"M15",name:"Aspirin 325mg PO STAT",cat:"medication",sub:"Cardiac"},
+  {id:"M16",name:"Heparin 60 units/kg IV bolus",cat:"medication",sub:"Anticoag"},
+  {id:"M17",name:"Heparin drip 12 units/kg/hr IV",cat:"medication",sub:"Anticoag"},
+  {id:"M18",name:"Norepinephrine 0.1mcg/kg/min IV",cat:"medication",sub:"Pressor"},
+  {id:"M19",name:"Albuterol 2.5mg nebulizer q4h+PRN",cat:"medication",sub:"Respiratory"},
+  {id:"M20",name:"Methylprednisolone 125mg IV",cat:"medication",sub:"Steroid"},
+  {id:"M21",name:"Furosemide 40mg IV STAT",cat:"medication",sub:"Diuretic"},
+  {id:"M22",name:"Lorazepam 1mg IV PRN anxiety/seizure",cat:"medication",sub:"Sedative"},
+  {id:"M23",name:"Naloxone 0.4mg IV/IM PRN",cat:"medication",sub:"Reversal"},
+  {id:"M24",name:"Epinephrine 0.3mg IM (anaphylaxis)",cat:"medication",sub:"Emergency"},
+  {id:"M25",name:"Hydrocortisone 100mg IV q8h",cat:"medication",sub:"Steroid"},
+  {id:"M26",name:"Cefazolin 2g IV STAT (pre-op)",cat:"medication",sub:"Antibiotic"},
+  {id:"M27",name:"Insulin Regular 5 units IV STAT",cat:"medication",sub:"Endocrine"},
+  // Nursing
+  {id:"N1",name:"Continuous Pulse Oximetry",cat:"nursing",sub:"Monitoring"},
+  {id:"N2",name:"Telemetry Monitoring",cat:"nursing",sub:"Monitoring"},
+  {id:"N3",name:"Strict I&O",cat:"nursing",sub:"Assessment"},
+  {id:"N4",name:"Fall Precautions",cat:"nursing",sub:"Safety"},
+  {id:"N5",name:"NPO",cat:"nursing",sub:"Diet"},
+  {id:"N6",name:"Foley Catheter Insertion",cat:"nursing",sub:"Procedure"},
+  {id:"N7",name:"Vitals q15min x4 then q1h",cat:"nursing",sub:"Monitoring"},
+  {id:"N8",name:"Neuro checks q1h",cat:"nursing",sub:"Assessment"},
+  {id:"N9",name:"2L Nasal Cannula O2",cat:"nursing",sub:"Respiratory"},
+  {id:"N10",name:"Non-Rebreather 15L O2",cat:"nursing",sub:"Respiratory"},
+  {id:"N11",name:"BiPAP 12/5 FiO2 100%",cat:"nursing",sub:"Respiratory"},
+];
 
-// ─── SMART PHRASES ───
-const SMART_PHRASES = {
-  ".nml":     "Within normal limits.",
-  ".nad":     "No acute distress. Patient is comfortable, alert, and cooperative.",
-  ".rrr":     "Regular rate and rhythm. No murmurs, rubs, or gallops.",
-  ".ctab":    "Clear to auscultation bilaterally. No wheezes, rales, or rhonchi.",
-  ".soft":    "Soft, non-tender, non-distended. Normoactive bowel sounds in all four quadrants.",
-  ".aox3":    "Alert and oriented to person, place, and time.",
-  ".aox4":    "Alert and oriented to person, place, time, and situation.",
-  ".perrla":  "Pupils equal, round, and reactive to light and accommodation. 3mm → 2mm bilaterally.",
-  ".neuro":   "Cranial nerves II-XII grossly intact. Sensation intact to light touch in all extremities. Motor strength 5/5 in all extremities. Gait not assessed.",
-  ".skin":    "Warm, dry, and intact. No rashes, lesions, or breakdown noted. Capillary refill < 2 seconds.",
-  ".educ":    "Patient educated on diagnosis, treatment plan, expected course, and return precautions. Patient verbalized understanding and agreement with plan. Questions answered.",
-  ".ivaccess":"Peripheral IV access obtained: 18g right antecubital fossa, flushed with 10mL NS, patent without infiltration.",
-  ".fallrisk":"Fall risk assessment completed. Patient is [low/moderate/high] risk. Appropriate precautions implemented including bed in low position, call light within reach, non-skid footwear provided.",
-  ".painass": "Pain assessment: Location [___], Quality [sharp/dull/burning/aching], Severity [___/10], Onset [___], Duration [___], Radiation [Y/N — where], Aggravating factors [___], Alleviating factors [___].",
-  ".codestat":"Code status discussed with patient/family. Patient is FULL CODE. Wishes documented.",
-  ".dispo":   "Disposition discussed with patient. Patient agreeable to plan. Discharge instructions reviewed including return precautions: return to ED for [worsening symptoms, fever, new symptoms].",
-  ".sepsis":  "Sepsis screening positive. Hour-1 bundle initiated: lactate drawn, blood cultures obtained prior to antibiotics, broad-spectrum antibiotics administered, 30mL/kg crystalloid bolus initiated for hypotension/lactate ≥ 4.",
-  ".stemi":   "STEMI alert activated. Cardiology notified. ASA 325mg administered. Heparin bolus and drip initiated. Cath lab team mobilized. Door-to-balloon time tracking initiated.",
-  ".stroke":  "Stroke alert activated. Last known well: [time]. NIHSS score: [___]. CT Head obtained. Neurology consulted. tPA eligibility being assessed.",
+/* ─── RESULT GENERATORS per patient ─── */
+const RESULT_GEN={
+  P1:{
+    _tc:0,
+    cbc:()=>[{n:"WBC",v:rr(10.5,12.2),u:"K/uL",r:"4.5-11.0",lo:4.5,hi:11},{n:"Hgb",v:rr(12.8,13.4),u:"g/dL",r:"12-16",lo:12,hi:16},{n:"Plt",v:rr(230,260),u:"K/uL",r:"150-400",lo:150,hi:400}],
+    cmp:()=>[{n:"Na",v:rr(136,140,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(3.9,4.3),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"Cl",v:rr(100,104,0),u:"mEq/L",r:"98-106",lo:98,hi:106},{n:"CO2",v:rr(22,26,0),u:"mEq/L",r:"22-28",lo:22,hi:28},{n:"BUN",v:rr(22,28,0),u:"mg/dL",r:"7-20",lo:7,hi:20},{n:"Cr",v:rr(1.3,1.5),u:"mg/dL",r:"0.6-1.2",lo:0.6,hi:1.2},{n:"Glucose",v:rr(210,240,0),u:"mg/dL",r:"70-100",lo:70,hi:100},{n:"Ca",v:rr(8.8,9.4),u:"mg/dL",r:"8.5-10.5",lo:8.5,hi:10.5},{n:"AST",v:rr(28,38,0),u:"U/L",r:"10-40",lo:10,hi:40},{n:"ALT",v:rr(22,32,0),u:"U/L",r:"7-56",lo:7,hi:56},{n:"T.Bili",v:rr(0.6,1.0),u:"mg/dL",r:"0.1-1.2",lo:0.1,hi:1.2},{n:"Albumin",v:rr(3.4,3.8),u:"g/dL",r:"3.5-5.0",lo:3.5,hi:5}],
+    bmp:()=>[{n:"Na",v:rr(136,140,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(3.9,4.3),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"Cr",v:rr(1.3,1.5),u:"mg/dL",r:"0.6-1.2",lo:0.6,hi:1.2},{n:"Glucose",v:rr(210,240,0),u:"mg/dL",r:"70-100",lo:70,hi:100}],
+    trop:function(){this._tc=(this._tc||0)+1;const vals=[0.42,0.89,1.64,2.31,3.08,3.52];const v=vals[Math.min(this._tc-1,vals.length-1)]+rr(-0.05,0.05);return[{n:"Troponin I",v:+v.toFixed(2),u:"ng/mL",r:"<0.04",lo:0,hi:0.04}];},
+    bnp:()=>[{n:"BNP",v:rr(350,420,0),u:"pg/mL",r:"<100",lo:0,hi:100}],
+    ptinr:()=>[{n:"PT",v:rr(11.5,13),u:"sec",r:"11-13.5",lo:11,hi:13.5},{n:"INR",v:rr(0.9,1.1),u:"",r:"0.9-1.1",lo:0.9,hi:1.1}],
+    ptt:()=>[{n:"PTT",v:rr(28,35,0),u:"sec",r:"25-35",lo:25,hi:35}],
+    lactate:()=>[{n:"Lactate",v:rr(1.2,1.8),u:"mmol/L",r:"0.5-2.0",lo:0.5,hi:2}],
+    a1c:()=>[{n:"HbA1c",v:rr(7.8,8.6),u:"%",r:"<5.7",lo:0,hi:5.7}],
+    cxr:()=>[{n:"CXR PA/Lat",v:"Mild cardiomegaly. No infiltrate. No PTX.",u:"",r:"",f:"ABNORMAL",cat:"Imaging",rpt:"FINDINGS: Mildly enlarged cardiac silhouette. Lungs clear. No effusion or PTX.\n\nIMPRESSION:\n1. Mild cardiomegaly\n2. No acute cardiopulmonary process"}],
+    ekg:()=>[{n:"EKG 12-Lead",v:"Sinus tach 98. ST depression V3-V6. TWI I, aVL, V5-V6.",u:"",r:"",f:"ABNORMAL",cat:"Diagnostic",rpt:"RATE: 98 bpm\nRHYTHM: Sinus tachycardia\nST: Horizontal ST depression 1-2mm V3-V6\nT-WAVE: Inversions I, aVL, V5-V6\nINTERVALS: PR 164, QRS 88, QTc 448\n\nINTERPRETATION: Ischemic changes c/w NSTEMI. Recommend serial troponins, heparin, cardiology consult."}],
+    ctca:()=>[{n:"CT Coronary Angiography",v:"LAD 80% mid-segment. LCx 40%. RCA patent.",u:"",r:"",f:"ABNORMAL",cat:"Imaging",rpt:"LAD: 80% stenosis mid-segment, mixed plaque.\nLCx: 40% proximal.\nRCA: Patent.\nCalcium score: 342.\n\nIMPRESSION: Significant LAD disease. Recommend cath."}],
+    ts:()=>[{n:"Type & Screen",v:"Type A+. Antibody screen negative.",u:"",r:"",f:"NORMAL",cat:"Lab"}],
+    mag:()=>[{n:"Magnesium",v:rr(1.8,2.2),u:"mg/dL",r:"1.7-2.2",lo:1.7,hi:2.2}],
+  },
+  P2:{
+    cbc:()=>[{n:"WBC",v:rr(8.5,10.5),u:"K/uL",r:"4.5-11.0",lo:4.5,hi:11},{n:"Hgb",v:rr(14.2,15.2),u:"g/dL",r:"13.5-17.5",lo:13.5,hi:17.5},{n:"Plt",v:rr(290,330),u:"K/uL",r:"150-400",lo:150,hi:400}],
+    bmp:()=>[{n:"Na",v:rr(138,142,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(3.8,4.4),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"Cr",v:rr(0.9,1.1),u:"mg/dL",r:"0.7-1.3",lo:0.7,hi:1.3},{n:"Glucose",v:rr(95,115,0),u:"mg/dL",r:"70-100",lo:70,hi:100}],
+    cmp:()=>[{n:"Na",v:rr(138,142,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(3.8,4.4),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"Cr",v:rr(0.9,1.1),u:"mg/dL",r:"0.7-1.3",lo:0.7,hi:1.3},{n:"AST",v:rr(20,32,0),u:"U/L",r:"10-40",lo:10,hi:40},{n:"ALT",v:rr(18,28,0),u:"U/L",r:"7-56",lo:7,hi:56}],
+    ptinr:()=>[{n:"PT",v:rr(11,12.5),u:"sec",r:"11-13.5",lo:11,hi:13.5},{n:"INR",v:rr(0.9,1.0),u:"",r:"0.9-1.1",lo:0.9,hi:1.1}],
+    xrext:()=>[{n:"XR R Forearm 2-View",v:"Displaced distal radius fx (Colles). Ulnar styloid avulsion.",u:"",r:"",f:"ABNORMAL",cat:"Imaging",rpt:"FINDINGS: Displaced transverse fracture distal radius, 25° dorsal angulation, 8mm displacement. Ulnar styloid tip avulsion.\n\nIMPRESSION:\n1. Colles fracture — displaced\n2. Ulnar styloid avulsion\n3. Recommend ortho for reduction/ORIF\n\n⚠ CRITICAL: Called to provider."}],
+    ekg:()=>[{n:"EKG 12-Lead",v:"NSR 82. No ST changes. Normal.",u:"",r:"",f:"NORMAL",cat:"Diagnostic",rpt:"RATE: 82\nRHYTHM: NSR\nNormal EKG."}],
+    ts:()=>[{n:"Type & Screen",v:"Type O+. Antibody neg.",u:"",r:"",f:"NORMAL",cat:"Lab"}],
+    cxr:()=>[{n:"CXR",v:"No acute abnormality.",u:"",r:"",f:"NORMAL",cat:"Imaging",rpt:"Normal chest radiograph."}],
+  },
+  P3:{
+    cbc:()=>[{n:"WBC",v:rr(15.5,18),u:"K/uL",r:"4.5-11.0",lo:4.5,hi:11},{n:"Hgb",v:rr(11.2,12.2),u:"g/dL",r:"12-16",lo:12,hi:16},{n:"Plt",v:rr(310,380),u:"K/uL",r:"150-400",lo:150,hi:400},{n:"Bands",v:rr(8,14,0),u:"%",r:"0-5",lo:0,hi:5}],
+    cmp:()=>[{n:"Na",v:rr(134,138,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(3.6,4.0),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"CO2",v:rr(28,33,0),u:"mEq/L",r:"22-28",lo:22,hi:28},{n:"Cr",v:rr(0.8,1.0),u:"mg/dL",r:"0.6-1.2",lo:0.6,hi:1.2},{n:"Glucose",v:rr(135,155,0),u:"mg/dL",r:"70-100",lo:70,hi:100}],
+    bmp:()=>[{n:"Na",v:rr(134,138,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(3.6,4.0),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"Cr",v:rr(0.8,1.0),u:"mg/dL",r:"0.6-1.2",lo:0.6,hi:1.2},{n:"Glucose",v:rr(135,155,0),u:"mg/dL",r:"70-100",lo:70,hi:100}],
+    procal:()=>[{n:"Procalcitonin",v:rr(2.0,3.2),u:"ng/mL",r:"<0.10",lo:0,hi:0.10}],
+    lactate:()=>[{n:"Lactate",v:rr(2.4,3.2),u:"mmol/L",r:"0.5-2.0",lo:0.5,hi:2}],
+    bcx:()=>[{n:"Blood Cx x2",v:"Pending — no growth",u:"",r:"",f:"PENDING",cat:"Lab",pending:true}],
+    ucx:()=>[{n:"Urine Cx",v:"Pending",u:"",r:"",f:"PENDING",cat:"Lab",pending:true}],
+    ua:()=>[{n:"UA-WBC",v:"0-2",u:"/HPF",r:"0-5",lo:0,hi:5},{n:"UA-Bacteria",v:"None",u:"",r:"None"}],
+    crp:()=>[{n:"CRP",v:rr(12,22),u:"mg/dL",r:"<0.5",lo:0,hi:0.5}],
+    abg:()=>[{n:"ABG pH",v:rr(7.32,7.38,2),u:"",r:"7.35-7.45",lo:7.35,hi:7.45},{n:"ABG pCO2",v:rr(48,56,0),u:"mmHg",r:"35-45",lo:35,hi:45},{n:"ABG pO2",v:rr(58,66,0),u:"mmHg",r:"80-100",lo:80,hi:100}],
+    cxr:()=>[{n:"CXR PA/Lat",v:"RLL consolidation w/ air bronchograms. Small R pleural effusion.",u:"",r:"",f:"ABNORMAL",cat:"Imaging",rpt:"FINDINGS: RLL consolidation with air bronchograms. Small right pleural effusion. Hyperinflated lungs c/w COPD.\n\nIMPRESSION:\n1. RLL pneumonia\n2. Small parapneumonic effusion\n3. COPD"}],
+    ekg:()=>[{n:"EKG",v:"Sinus tach 105. RAD. P-pulmonale.",u:"",r:"",f:"ABNORMAL",cat:"Diagnostic",rpt:"RATE: 105\nRHYTHM: Sinus tach\nAXIS: RAD\nP-wave: Peaked (P-pulmonale)\n\nINTERPRETATION: Sinus tach w/ right heart strain."}],
+  },
+  P4:{
+    cbc:()=>[{n:"WBC",v:rr(20,25),u:"K/uL",r:"4.5-11.0",lo:4.5,hi:11},{n:"Hgb",v:rr(10.2,11.5),u:"g/dL",r:"13.5-17.5",lo:13.5,hi:17.5},{n:"Plt",v:rr(98,140),u:"K/uL",r:"150-400",lo:150,hi:400},{n:"Bands",v:rr(12,20,0),u:"%",r:"0-5",lo:0,hi:5}],
+    cmp:()=>[{n:"Na",v:rr(131,136,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(4.8,5.6),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"CO2",v:rr(16,20,0),u:"mEq/L",r:"22-28",lo:22,hi:28},{n:"BUN",v:rr(42,58,0),u:"mg/dL",r:"7-20",lo:7,hi:20},{n:"Cr",v:rr(2.5,3.2),u:"mg/dL",r:"0.6-1.2",lo:0.6,hi:1.2},{n:"Glucose",v:rr(65,85,0),u:"mg/dL",r:"70-100",lo:70,hi:100},{n:"AST",v:rr(68,95,0),u:"U/L",r:"10-40",lo:10,hi:40},{n:"ALT",v:rr(52,78,0),u:"U/L",r:"7-56",lo:7,hi:56},{n:"T.Bili",v:rr(1.8,2.8),u:"mg/dL",r:"0.1-1.2",lo:0.1,hi:1.2},{n:"Albumin",v:rr(2.2,2.8),u:"g/dL",r:"3.5-5.0",lo:3.5,hi:5}],
+    bmp:()=>[{n:"Na",v:rr(131,136,0),u:"mEq/L",r:"136-145",lo:136,hi:145},{n:"K",v:rr(4.8,5.6),u:"mEq/L",r:"3.5-5.0",lo:3.5,hi:5},{n:"Cr",v:rr(2.5,3.2),u:"mg/dL",r:"0.6-1.2",lo:0.6,hi:1.2},{n:"Glucose",v:rr(65,85,0),u:"mg/dL",r:"70-100",lo:70,hi:100}],
+    lactate:()=>[{n:"Lactate",v:rr(4.0,5.5),u:"mmol/L",r:"0.5-2.0",lo:0.5,hi:2}],
+    procal:()=>[{n:"Procalcitonin",v:rr(10,18),u:"ng/mL",r:"<0.10",lo:0,hi:0.10}],
+    bcx:()=>[{n:"Blood Cx x2",v:"Pending — no growth",u:"",r:"",f:"PENDING",cat:"Lab",pending:true,pendFinal:{v:"POSITIVE: E. coli — pan-sensitive",f:"CRITICAL",delay:90e3}}],
+    ucx:()=>[{n:"Urine Cx",v:"Pending",u:"",r:"",f:"PENDING",cat:"Lab",pending:true,pendFinal:{v:">100K CFU/mL E. coli — pan-sensitive",f:"ABNORMAL",delay:70e3}}],
+    ua:()=>[{n:"UA-Appearance",v:"Cloudy",u:"",r:"Clear"},{n:"UA-Nitrites",v:"Positive",u:"",r:"Negative",f:"ABNORMAL"},{n:"UA-Leuk Est",v:"3+",u:"",r:"Negative",f:"ABNORMAL"},{n:"UA-WBC",v:">100",u:"/HPF",r:"0-5",lo:0,hi:5},{n:"UA-Bacteria",v:"3+",u:"",r:"None",f:"ABNORMAL"}],
+    ptinr:()=>[{n:"PT",v:rr(14.5,16.5),u:"sec",r:"11-13.5",lo:11,hi:13.5},{n:"INR",v:rr(1.3,1.5),u:"",r:"0.9-1.1",lo:0.9,hi:1.1}],
+    vbg:()=>[{n:"VBG pH",v:rr(7.24,7.30,2),u:"",r:"7.31-7.41",lo:7.31,hi:7.41},{n:"VBG pCO2",v:rr(32,38,0),u:"mmHg",r:"41-51",lo:41,hi:51},{n:"VBG Lactate",v:rr(4.0,5.5),u:"mmol/L",r:"0.5-2.0",lo:0.5,hi:2}],
+    cxr:()=>[{n:"CXR Portable AP",v:"Low volumes. Mild pulm vascular congestion. No consolidation.",u:"",r:"",f:"ABNORMAL",cat:"Imaging",rpt:"Low lung volumes. Mild perihilar congestion. No PNA. No effusion.\n\nIMPRESSION: No pneumonia. Mild vascular congestion."}],
+    ekg:()=>[{n:"EKG",v:"AFib w/ RVR 118. Nonspecific ST-T changes. LAD.",u:"",r:"",f:"ABNORMAL",cat:"Diagnostic",rpt:"RATE: 118\nRHYTHM: AFib\nAXIS: LAD\nST/T: Diffuse nonspecific changes\n\nINTERPRETATION: AFib w/ RVR. Demand ischemia vs rate-related changes in sepsis."}],
+    fib:()=>[{n:"Fibrinogen",v:rr(480,620,0),u:"mg/dL",r:"200-400",lo:200,hi:400}],
+  },
+};
+
+// Generic fallbacks
+const GENERIC_RES={
+  lipase:()=>[{n:"Lipase",v:rr(15,55,0),u:"U/L",r:"0-60",lo:0,hi:60}],
+  ddimer:()=>[{n:"D-Dimer",v:rr(0.2,0.4),u:"mg/L FEU",r:"<0.50",lo:0,hi:0.50}],
+  ts:()=>[{n:"Type & Screen",v:"Pending crossmatch",u:"",r:"",f:"PENDING",cat:"Lab",pending:true}],
+  uds:()=>[{n:"UDS",v:"Negative all panels",u:"",r:"Negative",f:"NORMAL",cat:"Lab"}],
+  ammonia:()=>[{n:"Ammonia",v:rr(18,35,0),u:"umol/L",r:"15-45",lo:15,hi:45}],
+  tsh:()=>[{n:"TSH",v:rr(1.2,3.8),u:"mIU/L",r:"0.4-4.0",lo:0.4,hi:4}],
+  mag:()=>[{n:"Mg",v:rr(1.8,2.1),u:"mg/dL",r:"1.7-2.2",lo:1.7,hi:2.2}],
+  phos:()=>[{n:"Phos",v:rr(2.8,4.2),u:"mg/dL",r:"2.5-4.5",lo:2.5,hi:4.5}],
+  fib:()=>[{n:"Fibrinogen",v:rr(220,350,0),u:"mg/dL",r:"200-400",lo:200,hi:400}],
+  ptt:()=>[{n:"PTT",v:rr(26,34,0),u:"sec",r:"25-35",lo:25,hi:35}],
+  esr:()=>[{n:"ESR",v:rr(10,25,0),u:"mm/hr",r:"0-20",lo:0,hi:20}],
+  crp:()=>[{n:"CRP",v:rr(0.2,0.8),u:"mg/dL",r:"<0.5",lo:0,hi:0.5}],
+  a1c:()=>[{n:"HbA1c",v:rr(5.0,5.6),u:"%",r:"<5.7",lo:0,hi:5.7}],
+  cthead:()=>[{n:"CT Head w/o",v:"No acute abnormality.",u:"",r:"",f:"NORMAL",cat:"Imaging",rpt:"No hemorrhage, mass, or midline shift.\n\nIMPRESSION: Normal."}],
+  ctap:()=>[{n:"CT A/P w/ contrast",v:"No acute pathology.",u:"",r:"",f:"NORMAL",cat:"Imaging",rpt:"Unremarkable.\nIMPRESSION: No acute abdominal pathology."}],
+  ctape:()=>[{n:"CTA Chest (PE)",v:"No PE.",u:"",r:"",f:"NORMAL",cat:"Imaging",rpt:"No filling defect.\nIMPRESSION: No pulmonary embolism."}],
+  usruq:()=>[{n:"US RUQ",v:"Normal GB. No biliary dilation.",u:"",r:"",f:"NORMAL",cat:"Imaging",rpt:"GB normal. CBD 4mm. Liver normal.\nIMPRESSION: Normal."}],
+  fast:()=>[{n:"FAST",v:"Negative — no free fluid.",u:"",r:"",f:"NORMAL",cat:"Imaging",rpt:"All 4 views negative.\nIMPRESSION: Negative FAST."}],
+  echo:()=>[{n:"Bedside Echo",v:"EF ~55%. No effusion. Normal.",u:"",r:"",f:"NORMAL",cat:"Diagnostic",rpt:"LV function grossly normal, EF ~55%. No pericardial effusion. IVC normal."}],
+};
+
+/* ─── PATIENTS ─── */
+const PATIENTS=[
+  {id:"P1",name:"Martinez, Elena",mrn:"MRN-482910",dob:"03/14/1958",age:67,sex:"F",loc:"ED-Bay 12",enc:"ENC-90421",status:"Active",acuity:"ESI-2",
+    chief:"Chest pain, diaphoresis × 2hrs",
+    triage:"67F PMH HTN/DM2/HLD presenting with acute substernal CP radiating to L arm, diaphoresis × 2hr. 8/10 pressure-like, at rest. Takes ASA 81mg daily. EKG at triage: ST depression V3-V6, TWI lateral leads.",
+    allergies:[{agent:"Penicillin",rxn:"Anaphylaxis",sev:"High"},{agent:"Sulfa",rxn:"Rash",sev:"Mod"}],
+    alerts:["Fall Risk","DVT Prophylaxis Required","Cardiac Alert"],
+    problems:["Hypertension","Type 2 DM","Hyperlipidemia","GERD","OA bilateral knees","Obesity BMI 32"],
+    homeMeds:["Lisinopril 20mg PO daily","Metformin 1000mg PO BID","Atorvastatin 40mg PO QHS","Omeprazole 20mg PO daily","ASA 81mg PO daily","Amlodipine 5mg PO daily"],
+    vitals:[{t:"14:32",hr:102,bp:"168/94",rr:22,spo2:94,temp:98.8,pain:8,src:"Triage"},{t:"14:50",hr:98,bp:"162/90",rr:20,spo2:95,temp:98.7,pain:7,src:"RN"},{t:"15:15",hr:94,bp:"155/88",rr:18,spo2:96,temp:98.6,pain:5,src:"RN"}],
+    preResults:[{n:"Troponin I",v:"0.42",u:"ng/mL",r:"<0.04",f:"CRITICAL",t:"14:45",cat:"Lab"},{n:"EKG 12-Lead",v:"ST depression V3-V6. TWI lateral. Sinus tach 98.",f:"ABNORMAL",t:"14:40",cat:"Diagnostic",rpt:"ST depression V3-V6. TWI I,aVL,V5-V6.\nSinus tach 98. QTc 448.\nIschemic changes c/w NSTEMI."}],
+    _creatinine:1.4,edCourse:"",notes:[]},
+  {id:"P2",name:"Johnson, Marcus",mrn:"MRN-738201",dob:"11/22/1985",age:40,sex:"M",loc:"ED-Bay 5",enc:"ENC-90422",status:"Active",acuity:"ESI-3",
+    chief:"Fall from ladder — R arm deformity, laceration",
+    triage:"40M fell ~8ft from ladder onto outstretched R hand. Obvious R distal forearm deformity. 4cm laceration R forearm, controlled. NVI distally. No LOC/head strike/neck pain. Tetanus unknown. Ate 2hr ago.",
+    allergies:[{agent:"Codeine",rxn:"Nausea/Vomiting",sev:"Mod"}],
+    alerts:["Tetanus Due","Pre-Op Clearance Needed"],
+    problems:["Asthma (mild intermittent)","Seasonal allergies"],
+    homeMeds:["Albuterol MDI PRN","Cetirizine 10mg PO daily"],
+    vitals:[{t:"13:10",hr:110,bp:"148/92",rr:20,spo2:98,temp:98.4,pain:9,src:"Triage"},{t:"13:35",hr:98,bp:"138/86",rr:18,spo2:99,temp:98.5,pain:7,src:"RN"},{t:"14:00",hr:88,bp:"132/82",rr:16,spo2:99,temp:98.4,pain:5,src:"RN"}],
+    preResults:[],_creatinine:1.0,edCourse:"",notes:[]},
+  {id:"P3",name:"Chen, Lisa",mrn:"MRN-219384",dob:"07/08/1972",age:53,sex:"F",loc:"ED-Bay 8",enc:"ENC-90423",status:"Active",acuity:"ESI-2",
+    chief:"Acute dyspnea, productive cough × 3d, fever 101.8°F",
+    triage:"53F COPD (moderate, 1ppd×30yr) w/ worsening dyspnea, productive yellow-green sputum × 3d. Fever 101.8 at home. SpO2 88% on RA → 91% on 2L NC. Accessory muscles. Short sentences only.",
+    allergies:[],
+    alerts:["Droplet Precautions","Supplemental O2 Required","Sepsis Screen Positive"],
+    problems:["COPD moderate (GOLD II)","Smoker 1ppd×30yr","Osteoporosis","MDD","Vitamin D deficiency"],
+    homeMeds:["Tiotropium 18mcg INH daily","Fluticasone/Salmeterol 250/50 INH BID","Albuterol neb PRN","Sertraline 100mg PO daily","Alendronate 70mg PO weekly","Vitamin D3 2000 IU PO daily"],
+    vitals:[{t:"12:45",hr:108,bp:"130/78",rr:28,spo2:88,temp:101.8,pain:4,src:"Triage"},{t:"13:15",hr:102,bp:"128/76",rr:24,spo2:91,temp:101.4,pain:3,src:"RN"},{t:"14:00",hr:96,bp:"126/74",rr:22,spo2:93,temp:100.8,pain:2,src:"RN"}],
+    preResults:[],_creatinine:0.9,edCourse:"",notes:[]},
+  {id:"P4",name:"Williams, Robert",mrn:"MRN-605827",dob:"01/30/1945",age:81,sex:"M",loc:"ICU-Bed 3",enc:"ENC-90420",status:"Active",acuity:"ESI-1",
+    chief:"Septic shock — UTI source, on vasopressors",
+    triage:"81M transferred ED→ICU. AMS (GCS 13), fever 103.1, MAP 52. UTI-source septic shock. 30mL/kg NS given. Norepinephrine started. Broad-spectrum abx initiated. Foley: purulent urine.",
+    allergies:[{agent:"Vancomycin",rxn:"Red Man Syndrome",sev:"Mod"},{agent:"Iodine contrast",rxn:"Hives",sev:"Mod"}],
+    alerts:["Fall Risk","FULL CODE","Vasopressors Active","Central Line","Contact Isolation"],
+    problems:["BPH","AFib (chronic, on anticoag)","CHF HFrEF (EF 35%)","CKD 3b (baseline Cr 1.8)","Mild Alzheimer's","Recurrent UTIs","Gout"],
+    homeMeds:["Apixaban 5mg PO BID","Carvedilol 12.5mg PO BID","Furosemide 40mg PO daily","Tamsulosin 0.4mg PO QHS","Donepezil 10mg PO QHS","Allopurinol 100mg PO daily"],
+    vitals:[{t:"10:00",hr:118,bp:"78/50",rr:26,spo2:92,temp:103.1,pain:6,src:"ED"},{t:"11:00",hr:110,bp:"85/55",rr:24,spo2:94,temp:102.4,pain:5,src:"ED RN"},{t:"12:00",hr:102,bp:"92/60",rr:22,spo2:95,temp:101.6,pain:4,src:"ICU RN"}],
+    preResults:[{n:"WBC",v:"22.4",u:"K/uL",r:"4.5-11.0",f:"CRITICAL",t:"10:15",cat:"Lab"},{n:"Lactate",v:"4.6",u:"mmol/L",r:"0.5-2.0",f:"CRITICAL",t:"10:15",cat:"Lab"},{n:"Creatinine",v:"2.8",u:"mg/dL",r:"0.6-1.2",f:"HIGH",t:"10:20",cat:"Lab"},{n:"Procalcitonin",v:"12.8",u:"ng/mL",r:"<0.10",f:"CRITICAL",t:"10:25",cat:"Lab"},{n:"Urinalysis",v:"+Nitrites, >100 WBC, bacteria 3+",f:"ABNORMAL",t:"10:30",cat:"Lab"},{n:"Blood Cx x2",v:"Pending — no growth",f:"PENDING",t:"10:10",cat:"Lab"}],
+    _creatinine:2.8,
+    edCourse:"81M hx AFib, HFrEF EF35%, CKD3b, BPH. AMS, fever 103.1, hypotension MAP 52. UTI-source septic shock. 30mL/kg IVF. Started norepinephrine. Meropenem initiated. Foley: purulent urine. WBC 22.4, lactate 4.6, Cr 2.8 (baseline 1.8), procal 12.8. Transferred ICU.",
+    notes:[]},
+];
+
+/* ─── NOTE TEMPLATES (abbreviated for space) ─── */
+const NOTE_TEMPLATES={
+  "ED Provider Note":"CHIEF COMPLAINT: [chief]\n\nHPI:\n[age][sex] w/ PMH [problems] presenting with [chief].\n\n[Detail onset, location, duration, character, severity, associated sx]\n\nROS: [pertinent positives/negatives]\n\nEXAM:\nGeneral: \nHEENT: \nCV: \nPulm: \nAbd: \nExt: \nNeuro: \n\nDIAGNOSTICS:\n[labs, imaging, EKG]\n\nED COURSE:\n[interventions, responses]\n\nMDM:\n[assessment, differential, reasoning]\n\nDIAGNOSIS:\n1. \n\nPLAN:\n[disposition, orders, consults, f/u]\n\nAttending: ___",
+  "Nursing Assessment":"NURSING ASSESSMENT — [time]\nPatient: [name] | [mrn]\n\nA: Airway [patent/compromised]\nB: Breathing RR___ SpO2___% on ___\nC: Circulation HR___ BP___ skin [WDI/cool/mottled]\nD: Disability GCS___ pupils ___\nE: Exposure Temp___\n\nPain: ___/10 Location: ___ Quality: ___\nIV Access: ___\nSafety: Fall risk [Y/N] Restraints [Y/N]\n\nInterventions: ___\n\nRN: ___",
+  "Progress Note":"PROGRESS NOTE — [time]\n\nSubjective: \nObjective:\n  Vitals: \n  Exam: \n  New results: \n\nAssessment/Plan:\n\nProvider: ___",
+  "Procedure Note":"PROCEDURE NOTE\nProcedure: ___\nIndication: ___\nConsent: ___\nTimeout: ☐\nTechnique: ___\nFindings: ___\nComplications: None\nEBL: ___\n\nProvider: ___",
+};
+
+const SMART_PHRASES={
+  ".nml":"Within normal limits.",
+  ".nad":"No acute distress.",
+  ".rrr":"Regular rate and rhythm, no murmurs/rubs/gallops.",
+  ".ctab":"Clear to auscultation bilaterally, no wheezes/rales/rhonchi.",
+  ".soft":"Soft, non-tender, non-distended, normoactive bowel sounds.",
+  ".aox3":"Alert and oriented ×3 (person, place, time).",
+  ".perrla":"PERRL 3→2mm bilaterally.",
+  ".neuro":"CN II-XII intact. Strength 5/5 all extremities. Sensation intact.",
+  ".skin":"Warm, dry, intact. No rash. Cap refill <2s.",
+  ".sepsis":"Sepsis screening positive. Hour-1 bundle initiated: lactate drawn, BCx obtained prior to abx, broad-spectrum abx given, 30mL/kg crystalloid for hypotension/lactate≥4.",
+  ".stemi":"STEMI alert activated. Cardiology notified. ASA 325 given. Heparin initiated. Cath lab mobilized.",
+  ".acs":"ACS protocol: ASA 325, heparin bolus+drip, serial troponins q3h, tele, cardiology consult. NPO for possible cath.",
+  ".fall":"Patient fall risk assessment completed. Precautions in place: bed low, rails up, call light in reach, non-skid footwear.",
 };
